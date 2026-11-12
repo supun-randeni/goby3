@@ -1,4 +1,4 @@
-// Copyright 2009-2025:
+// Copyright 2009-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -25,12 +25,11 @@
 #ifndef GOBY_ACOMMS_MODEMDRIVER_DRIVER_BASE_H
 #define GOBY_ACOMMS_MODEMDRIVER_DRIVER_BASE_H
 
-#include <atomic>                         // for atomic
-#include <boost/signals2/signal.hpp>      // for signal
-#include <boost/smart_ptr/shared_ptr.hpp> // for shared_ptr
-#include <iosfwd>                         // for ofstream
-#include <memory>                         // for shared_ptr, __shared_p...
-#include <string>                         // for string
+#include <atomic>                    // for atomic
+#include <boost/signals2/signal.hpp> // for signal
+#include <iosfwd>                    // for ofstream
+#include <memory>                    // for shared_ptr, __shared_p...
+#include <string>                    // for string
 
 #include "goby/acomms/protobuf/driver_base.pb.h" // for DriverCo...
 

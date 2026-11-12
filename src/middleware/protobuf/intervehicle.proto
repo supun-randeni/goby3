@@ -45,6 +45,31 @@ message PortalConfig
             (goby.field).description = "Time between modem reports",
             (dccl.field) = { units { base_dimensions: "T" } }
         ];
+
+        message RestartOnFailure
+        {
+            optional double interval = 1 [
+                default = 60,
+                (goby.field).description =
+                    "Time from a driver failure to the next attempt to "
+                    "start a new driver",
+                (dccl.field) = { units { base_dimensions: "T" } }
+            ];
+        }
+        optional RestartOnFailure restart_on_failure = 22
+            [(goby.field).description =
+                 "If set, a driver that fails, at startup or while running, is "
+                 "replaced by a new one after restart_on_failure.interval, "
+                 "while the portal's other links keep running. If omitted, a "
+                 "driver failure terminates the portal."];
+
+        optional bool shutdown_driver_on_exit = 23 [
+            default = true,
+            (goby.field).description =
+                "Call the driver's shutdown() when the portal exits, so the "
+                "driver can finish what is in progress (e.g. an Iridium SBD "
+                "session) before the modem is released"
+        ];
     }
 
     repeated LinkConfig link = 1;
@@ -176,6 +201,12 @@ message ExpireData
         EXPIRED_NO_SUBSCRIBERS = 1;
         EXPIRED_TIME_TO_LIVE_EXCEEDED = 2;
         EXPIRED_BUFFER_OVERFLOW = 3;
+        // replaced before transmission: a publication by a newer one with
+        // clear_pending, or a queued subscription by one with the opposite
+        // action for the same type, group and configuration. A queued
+        // subscription replaced by an equivalent one (possibly from another
+        // local subscriber) is not expired but acked or expired with it.
+        EXPIRED_SUPERSEDED = 4;
     }
     required ExpireReason reason = 3;
 

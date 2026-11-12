@@ -1,4 +1,4 @@
-// Copyright 2011-2025:
+// Copyright 2011-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -32,10 +32,10 @@
 #include <map>           // for operat...
 #include <memory>        // for allocator
 #include <ostream>       // for basic_...
+#include <filesystem>
 #include <stdexcept>     // for runtim...
 #include <string>        // for string
 #include <type_traits>   // for __succ...
-#include <unistd.h>      // for usleep
 #include <unordered_map> // for operat...
 #include <vector>        // for vector
 
@@ -45,10 +45,8 @@
 #include <Wt/WServer.h>                              // for WServer
 #include <boost/algorithm/string/classification.hpp> // for is_any...
 #include <boost/algorithm/string/split.hpp>          // for split
-#include <boost/filesystem.hpp>                      // for direct...
 #include <boost/iterator/iterator_facade.hpp>        // for iterat...
 #include <boost/lexical_cast/bad_lexical_cast.hpp>   // for bad_le...
-#include <boost/system/error_code.hpp>               // for error_...
 #include <boost/units/quantity.hpp>                  // for operator/
 #include <google/protobuf/descriptor.h>              // for Descri...
 
@@ -132,7 +130,10 @@ int main(int argc, char* argv[])
         for (auto& i : plugin_vec)
         {
             glog.is(VERBOSE) && glog << "Loading liaison plugin library: " << i << std::endl;
-            void* handle = dlopen(i.c_str(), RTLD_LAZY);
+            // RTLD_NODELETE: keep the library mapped for the life of the process (even if
+            // dlclose() is called) as the protobuf descriptor pools may reference memory
+            // (e.g. custom options extensions) owned by this library at static destruction
+            void* handle = dlopen(i.c_str(), RTLD_LAZY | RTLD_NODELETE);
             if (handle)
                 goby::apps::zeromq::LiaisonWtThread::plugin_handles_.push_back(handle);
             else
@@ -177,15 +178,11 @@ goby::apps::zeromq::Liaison::Liaison()
     // load all .proto file directories
     for (int i = 0, n = cfg().load_proto_dir_size(); i < n; ++i)
     {
-        boost::filesystem::path current_dir(cfg().load_proto_dir(i));
+        std::filesystem::path current_dir(cfg().load_proto_dir(i));
 
-        for (boost::filesystem::directory_iterator iter(current_dir), end; iter != end; ++iter)
+        for (std::filesystem::directory_iterator iter(current_dir), end; iter != end; ++iter)
         {
-#if BOOST_FILESYSTEM_VERSION == 3
             if (iter->path().extension().string() == ".proto")
-#else
-            if (iter->path().extension() == ".proto")
-#endif
 
                 load_proto_file(iter->path().string());
         }
@@ -195,25 +192,36 @@ goby::apps::zeromq::Liaison::Liaison()
     {
         std::string doc_root;
 
-        boost::system::error_code ec;
+        std::error_code ec;
         if (cfg().has_docroot())
             doc_root = cfg().docroot();
-        else if (boost::filesystem::exists(boost::filesystem::path(GOBY_LIAISON_COMPILED_DOCROOT),
-                                           ec))
+        else if (std::filesystem::exists(std::filesystem::path(GOBY_LIAISON_COMPILED_DOCROOT),
+                                         ec))
             doc_root = GOBY_LIAISON_COMPILED_DOCROOT;
-        else if (boost::filesystem::exists(boost::filesystem::path(GOBY_LIAISON_INSTALLED_DOCROOT),
-                                           ec))
+        else if (std::filesystem::exists(std::filesystem::path(GOBY_LIAISON_INSTALLED_DOCROOT),
+                                         ec))
             doc_root = GOBY_LIAISON_INSTALLED_DOCROOT;
         else
             throw(std::runtime_error("No valid docroot found for Goby Liaison. Set docroot to the "
                                      "valid path to what is normally /usr/share/goby/liaison"));
 
-        std::string static_resources = "/css,/fonts,/images,/resources";
+        std::string static_resources = "/css,/fonts,/images,/resources,/leaflet,/tiles";
+
+        // docroot wt_config.xml points WLeafletMap at the bundled Leaflet, so the map works offline
+        std::string wt_config_param;
+        const std::string user_params = " " + cfg().additional_wt_http_params() + " ";
+        const bool user_wt_config = getenv("WT_CONFIG_XML") ||
+                                    user_params.find(" --config") != std::string::npos ||
+                                    user_params.find(" -c ") != std::string::npos;
+        const std::string docroot_wt_config = doc_root + "/wt_config.xml";
+        if (!user_wt_config && std::filesystem::exists(docroot_wt_config, ec))
+            wt_config_param = " --config " + docroot_wt_config;
 
         std::vector<std::string> wt_argv_vec;
         std::string str = " --docroot " + doc_root + ";" + static_resources + " --http-port " +
                           goby::util::as<std::string>(cfg().http_port()) + " --http-address " +
-                          cfg().http_address() + " " + cfg().additional_wt_http_params();
+                          cfg().http_address() + wt_config_param + " " +
+                          cfg().additional_wt_http_params();
         boost::split(wt_argv_vec, str, boost::is_any_of(" "));
 
         glog.is(DEBUG1) && glog << "setting Wt cfg to: " << std::flush;
@@ -242,16 +250,11 @@ goby::apps::zeromq::Liaison::Liaison()
 
     // clean up sessions if there are none
     // see https://redmine.webtoolkit.eu/boards/2/topics/5614?r=5615#message-5615
-    expire_sessions_ = [=]()
+    // a non-zero schedule() delay uses a timer; sleeping in a posted job would block Wt's strand
+    expire_sessions_ = [this]()
     {
-        int seconds = 10;
-        auto start = goby::time::SteadyClock::now();
-        while (!terminating_ &&
-               goby::time::SteadyClock::now() < start + std::chrono::seconds(seconds))
-        {
-            // 100 ms to avoid pegging CPU but be responsive to shutdown
-            usleep(100000);
-        }
+        if (terminating_)
+            return;
 
         glog.is_debug3() && glog << std::chrono::duration_cast<std::chrono::seconds>(
                                         goby::time::SteadyClock::now().time_since_epoch())
@@ -260,22 +263,15 @@ goby::apps::zeromq::Liaison::Liaison()
 
         wt_server_.expireSessions();
 
-        if (!terminating_)
-            Wt::WServer::instance()->ioService().post(expire_sessions_);
+        Wt::WServer::instance()->ioService().schedule(std::chrono::seconds(10), expire_sessions_);
     };
 
-    Wt::WServer::instance()->ioService().post(expire_sessions_);
+    Wt::WServer::instance()->ioService().schedule(std::chrono::seconds(10), expire_sessions_);
 }
 
 void goby::apps::zeromq::Liaison::load_proto_file(const std::string& path)
 {
-#if BOOST_FILESYSTEM_VERSION == 3
-    boost::filesystem::path bpath = boost::filesystem::absolute(path);
-    bpath.lexically_normal();
-#else
-    boost::filesystem::path bpath = boost::filesystem::complete(path);
-    bpath.normalize();
-#endif
+    std::filesystem::path bpath = std::filesystem::absolute(path).lexically_normal();
 
     glog.is(VERBOSE) && glog << "Loading protobuf file: " << bpath << std::endl;
 

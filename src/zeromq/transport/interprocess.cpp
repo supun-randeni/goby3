@@ -1,4 +1,4 @@
-// Copyright 2016-2023:
+// Copyright 2016-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -28,6 +28,28 @@
 #include <type_traits> // for __success_type<>::type
 #include <utility>     // for pair, move
 
+// TSan annotations for ZMQ inproc:// zero-copy false positive.
+// The control PAIR socket uses inproc:// which transfers the exact same
+// message buffer pointer from sender to receiver (zero-copy). TSan sees the
+// pre-send SerializeToArray write and the post-recv ParseFromArray read on the
+// same address without a visible synchronization edge, since the real
+// synchronization is inside libzmq (not TSan-annotated).
+// __tsan_release(p) / __tsan_acquire(p) establish the happens-before edge
+// that TSan needs: the sender "releases" the buffer before send(); the
+// receiver "acquires" it after recv() and before any read.
+#ifdef __SANITIZE_THREAD__
+#include <sanitizer/tsan_interface.h>
+#define GOBY_TSAN_RELEASE(p) __tsan_release(p)
+#define GOBY_TSAN_ACQUIRE(p) __tsan_acquire(p)
+#else
+#define GOBY_TSAN_RELEASE(p) \
+    do {                     \
+    } while (0)
+#define GOBY_TSAN_ACQUIRE(p) \
+    do {                     \
+    } while (0)
+#endif
+
 #include "interprocess.h"
 
 #if GOOGLE_PROTOBUF_VERSION < 3001000
@@ -41,9 +63,11 @@ using namespace goby::util::logger;
 #ifdef USE_OLD_ZMQ_CPP_API
 int zmq_send_flags_none{0};
 int zmq_recv_flags_none{0};
+int zmq_recv_flags_dontwait{ZMQ_NOBLOCK};
 #else
 auto zmq_send_flags_none{zmq::send_flags::none};
 auto zmq_recv_flags_none{zmq::recv_flags::none};
+auto zmq_recv_flags_dontwait{zmq::recv_flags::dontwait};
 #endif
 
 bool zmq_socket_recv(zmq::socket_t& socket, zmq::message_t& msg,
@@ -88,8 +112,6 @@ void goby::zeromq::setup_socket(zmq::socket_t& socket, const protobuf::Socket& c
             endpoint = "tcp://" + (bind ? std::string("*") : formatted_address) + ":" +
                        std::to_string(cfg.ethernet_port());
 
-            std::cout << cfg.ShortDebugString() << ": " << endpoint << std::endl;
-
             break;
         }
 
@@ -105,12 +127,19 @@ void goby::zeromq::setup_socket(zmq::socket_t& socket, const protobuf::Socket& c
         socket.connect(endpoint.c_str());
 }
 
+std::string goby::zeromq::ready_marker_identifier(const std::string& client_name)
+{
+    return std::string(delimiter_str) + "goby::zeromq::_internal_ready" + delimiter_str +
+           client_name + delimiter_str;
+}
+
 //
 // InterProcessPortalMainThread
 //
 
-goby::zeromq::InterProcessPortalMainThread::InterProcessPortalMainThread(zmq::context_t& context)
-    : control_socket_(context, ZMQ_PAIR), publish_socket_(context, ZMQ_PUB)
+goby::zeromq::InterProcessPortalMainThread::InterProcessPortalMainThread(
+    zmq::context_t& context, const protobuf::InterProcessPortalConfig& cfg)
+    : cfg_(cfg), control_socket_(context, ZMQ_PAIR), publish_socket_(context, ZMQ_XPUB)
 {
     control_socket_.bind("inproc://control");
 }
@@ -122,6 +151,9 @@ bool goby::zeromq::InterProcessPortalMainThread::recv(protobuf::InprocControl* c
     bool message_received = false;
     if (zmq_socket_recv(control_socket_, zmq_msg, flags))
     {
+        // Acquire the inproc zero-copy buffer: happens-after the sender's GOBY_TSAN_RELEASE.
+        if (zmq_msg.data())
+            GOBY_TSAN_ACQUIRE(zmq_msg.data());
         control_msg->ParseFromArray((char*)zmq_msg.data(), zmq_msg.size());
         glog.is(DEBUG3) && glog << "Main thread received control msg: "
                                 << control_msg->ShortDebugString() << std::endl;
@@ -137,35 +169,85 @@ void goby::zeromq::InterProcessPortalMainThread::set_publish_cfg(const protobuf:
     have_pubsub_sockets_ = true;
 }
 
-void goby::zeromq::InterProcessPortalMainThread::set_hold_state(bool hold)
+void goby::zeromq::InterProcessPortalMainThread::set_hold_state(
+    bool hold, const std::set<std::string>& required_clients)
 {
-    // hold was on, and now it's off
-    if (hold_ && !hold)
+    if (!hold_ || !manager_hold_)
+        return;
+
+    if (!hold)
     {
-        hold_ = hold;
-
-        // TODO: this is necessary to allow initial ZMQ subscription forwarding
-        // messages to flow through the system so that we don't lose the
-        // first publication to subscriptions that happened before "hold: false"
-        // Find some way to remove this delay!
-        // Without this, we have problems losing the initial publications to
-        // goby::middleware::intervehicle::modem_subscription_forward_tx from
-        // the InterVehicle layer.
-        // Can we do this by replacing the PUB socket with an XPUB and checking
-        // for a subscriber?
-        sleep(1);
-
-        glog.is(DEBUG3) && glog << "InterProcessPortal**Main**Thread: Hold off" << std::endl;
-
-        // publish any queued up messages
-        for (auto& pub_pair : publish_queue_)
-            publish(pub_pair.first, &pub_pair.second[0], pub_pair.second.size());
-        publish_queue_.clear();
+        manager_hold_ = false;
+        required_clients_ = required_clients;
+        hold_release_deadline_ = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(cfg_.hold_release_timeout_seconds());
+        release_hold_if_ready();
     }
+}
+
+void goby::zeromq::InterProcessPortalMainThread::read_subscriptions()
+{
+    zmq::message_t msg;
+    while (zmq_socket_recv(publish_socket_, msg, zmq_recv_flags_dontwait))
+    {
+        if (msg.size() == 0)
+            continue;
+
+        // XPUB delivers a leading byte (1 subscribe, 0 unsubscribe) followed by the filter
+        const char* data = static_cast<const char*>(msg.data());
+        std::string identifier(data + 1, msg.size() - 1);
+        if (data[0] == 1)
+            subscriptions_.insert(identifier);
+        else
+            subscriptions_.erase(identifier);
+
+        glog.is(DEBUG3) && glog << "Publish socket " << (data[0] == 1 ? "gained" : "lost")
+                                << " subscription [" << identifier << "]" << std::endl;
+    }
+
+    if (hold_)
+        release_hold_if_ready();
+}
+
+void goby::zeromq::InterProcessPortalMainThread::release_hold_if_ready()
+{
+    if (!hold_ || manager_hold_)
+        return;
+
+    std::string missing;
+    for (const auto& client : required_clients_)
+    {
+        if (!subscriptions_.count(ready_marker_identifier(client)))
+            missing += (missing.empty() ? "" : ", ") + client;
+    }
+
+    if (!missing.empty())
+    {
+        if (std::chrono::steady_clock::now() < hold_release_deadline_)
+        {
+            glog.is(DEBUG3) && glog << "Hold released by manager; waiting for subscriptions of: "
+                                    << missing << std::endl;
+            return;
+        }
+
+        glog.is(WARN) &&
+            glog << "Hold released by manager but the subscriptions of required "
+                    "client(s) ["
+                 << missing << "] did not arrive within " << cfg_.hold_release_timeout_seconds()
+                 << " s; publishing anyway (early publications may be lost)" << std::endl;
+    }
+
+    hold_ = false;
+
+    glog.is(DEBUG3) && glog << "InterProcessPortal**Main**Thread: Hold off" << std::endl;
+
+    for (auto& pub_pair : publish_queue_)
+        publish(pub_pair.first, pub_pair.second.data(), pub_pair.second.size());
+    publish_queue_.clear();
 
     protobuf::InprocControl control;
     control.set_type(protobuf::InprocControl::NOTIFY_HOLD_STATE);
-    control.set_hold(hold);
+    control.set_hold(false);
     send_control_msg(control);
 }
 
@@ -177,7 +259,8 @@ void goby::zeromq::InterProcessPortalMainThread::publish(const std::string& iden
     {
         zmq::message_t msg(identifier.size() + size);
         memcpy(msg.data(), identifier.data(), identifier.size());
-        memcpy(static_cast<char*>(msg.data()) + identifier.size(), bytes, size);
+        if (size > 0)
+            memcpy(static_cast<char*>(msg.data()) + identifier.size(), bytes, size);
 
         publish_socket_.send(msg, zmq_send_flags_none);
 
@@ -189,7 +272,10 @@ void goby::zeromq::InterProcessPortalMainThread::publish(const std::string& iden
         glog.is(DEBUG3) && glog << "Buffering publication of " << size << " bytes to ["
                                 << identifier.substr(0, identifier.size() - 1) << "]" << std::endl;
 
-        publish_queue_.emplace_back(identifier, std::vector<char>(bytes, bytes + size));
+        if (size > 0)
+            publish_queue_.emplace_back(identifier, std::vector<char>(bytes, bytes + size));
+        else
+            publish_queue_.emplace_back(identifier, std::vector<char>{});
     }
 }
 
@@ -240,7 +326,9 @@ void goby::zeromq::InterProcessPortalMainThread::send_control_msg(
 {
     zmq::message_t zmq_control_msg(control.ByteSizeLong());
     control.SerializeToArray((char*)zmq_control_msg.data(), zmq_control_msg.size());
-
+    // Release the inproc zero-copy buffer: the receiver's GOBY_TSAN_ACQUIRE happens-after this.
+    if (zmq_control_msg.data())
+        GOBY_TSAN_RELEASE(zmq_control_msg.data());
     control_socket_.send(zmq_control_msg, zmq_send_flags_none);
 }
 
@@ -249,12 +337,14 @@ void goby::zeromq::InterProcessPortalMainThread::send_control_msg(
 //
 goby::zeromq::InterProcessPortalReadThread::InterProcessPortalReadThread(
     const protobuf::InterProcessPortalConfig& cfg, zmq::context_t& context,
-    std::atomic<bool>& alive, std::shared_ptr<std::condition_variable_any> poller_cv)
+    std::atomic<bool>& alive, std::shared_ptr<std::mutex> poller_mutex,
+    std::shared_ptr<std::condition_variable> poller_cv)
     : cfg_(cfg),
       control_socket_(context, ZMQ_PAIR),
       subscribe_socket_(context, ZMQ_SUB),
       manager_socket_(context, ZMQ_REQ),
       alive_(alive),
+      poller_mutex_(std::move(poller_mutex)),
       poller_cv_(std::move(poller_cv))
 {
     poll_items_.resize(NUMBER_SOCKETS);
@@ -346,6 +436,9 @@ void goby::zeromq::InterProcessPortalReadThread::send_manager_request(
 
 void goby::zeromq::InterProcessPortalReadThread::poll(long timeout_ms)
 {
+    if (poller_wakeup_pending_ && (timeout_ms < 0 || timeout_ms > poller_wakeup_retry_ms_))
+        timeout_ms = poller_wakeup_retry_ms_;
+
 #ifdef USE_OLD_CPPZMQ_POLL
     zmq::poll(&poll_items_[0], poll_items_.size(), timeout_ms);
 #else
@@ -374,11 +467,17 @@ void goby::zeromq::InterProcessPortalReadThread::poll(long timeout_ms)
             }
         }
     }
+
+    if (poller_wakeup_pending_)
+        wake_poller();
 }
 
 void goby::zeromq::InterProcessPortalReadThread::control_data(const zmq::message_t& zmq_msg)
 {
     // command from the main thread
+    // Acquire the inproc zero-copy buffer: happens-after the sender's GOBY_TSAN_RELEASE.
+    if (zmq_msg.data())
+        GOBY_TSAN_ACQUIRE((void*)zmq_msg.data());
     protobuf::InprocControl control_msg;
     control_msg.ParseFromArray((char*)zmq_msg.data(), zmq_msg.size());
 
@@ -481,7 +580,24 @@ void goby::zeromq::InterProcessPortalReadThread::send_control_msg(
 {
     zmq::message_t zmq_control_msg(control.ByteSizeLong());
     control.SerializeToArray((char*)zmq_control_msg.data(), zmq_control_msg.size());
+    // Release the inproc zero-copy buffer: the receiver's GOBY_TSAN_ACQUIRE happens-after this.
+    if (zmq_control_msg.data())
+        GOBY_TSAN_RELEASE(zmq_control_msg.data());
     control_socket_.send(zmq_control_msg, zmq_send_flags_none);
+    poller_wakeup_pending_ = true;
+    wake_poller();
+}
+
+// The main thread blocks on this thread's reply to its subscribe requests, possibly while holding
+// the poll mutex, so blocking on that mutex here (as notify_poller() does) could deadlock. Taking
+// it without blocking still rules out the window in which a signal would be lost; while the mutex
+// is held, poll() retries shortly.
+void goby::zeromq::InterProcessPortalReadThread::wake_poller()
+{
+    if (!poller_mutex_->try_lock())
+        return;
+    poller_mutex_->unlock();
+    poller_wakeup_pending_ = false;
     poller_cv_->notify_all();
 }
 
@@ -491,9 +607,11 @@ void goby::zeromq::InterProcessPortalReadThread::send_control_msg(
 
 unsigned goby::zeromq::Router::last_port(zmq::socket_t& socket)
 {
-    size_t last_endpoint_size = 100;
+    constexpr size_t last_endpoint_size = 100;
+    size_t zmq_last_endpoint_size = last_endpoint_size;
     char last_endpoint[last_endpoint_size];
-    int rc = zmq_getsockopt((void*)socket, ZMQ_LAST_ENDPOINT, &last_endpoint, &last_endpoint_size);
+    int rc =
+        zmq_getsockopt((void*)socket, ZMQ_LAST_ENDPOINT, &last_endpoint, &zmq_last_endpoint_size);
 
     if (rc != 0)
         throw(std::runtime_error("Could not retrieve ZMQ_LAST_ENDPOINT"));
@@ -718,6 +836,7 @@ goby::zeromq::Manager::handle_request(const protobuf::ManagerRequest& pb_request
             reported_clients_.insert(pb_request.client_name());
 
         pb_response.set_hold(hold_state());
+        for (const auto& client : required_clients_) pb_response.add_required_client(client);
     }
 
     return pb_response;

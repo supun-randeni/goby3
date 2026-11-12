@@ -1,4 +1,4 @@
-// Copyright 2011-2024:
+// Copyright 2011-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <sys/types.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 
 #include "goby/exception.h"
 #include "goby/middleware/application/configurator.h"
+#include "goby/middleware/application/detail/simulation_time.h"
 #include "goby/middleware/marshalling/detail/dccl_serializer_parser.h"
 #include "goby/middleware/protobuf/app_config.pb.h"
 #include "goby/time.h"
@@ -67,6 +69,17 @@ int run(int argc, char* argv[])
 
 namespace middleware
 {
+
+namespace julia
+{
+template <typename App> class ApplicationWrapper;
+}
+
+namespace python
+{
+template <typename App> class ApplicationWrapper;
+}
+
 /// \brief Base class for Goby applications. Generally you will want to use SingleThreadApplication or MultiThreadApplication rather than instantiating this class directly.
 template <typename Config> class Application
 {
@@ -81,25 +94,25 @@ template <typename Config> class Application
 
   protected:
     /// \brief Called just before initialize
-    virtual void pre_initialize(){};
+    virtual void pre_initialize() {};
 
     /// \brief Perform any initialize tasks that couldn't be done in the constructor
-    virtual void initialize(){};
+    virtual void initialize() {};
 
     /// \brief Called just after initialize
-    virtual void post_initialize(){};
+    virtual void post_initialize() {};
 
-    /// \brief Runs continuously until quit() is called
+    /// \brief Runs once
     virtual void run() = 0;
 
     /// \brief Called just before finalize
-    virtual void pre_finalize(){};
+    virtual void pre_finalize() {};
 
     /// \brief Perform any final cleanup actions just before the destructor is called
-    virtual void finalize(){};
+    virtual void finalize() {};
 
     /// \brief Called just after finalize
-    virtual void post_finalize(){};
+    virtual void post_finalize() {};
 
     /// \brief Requests a clean exit.
     ///
@@ -127,6 +140,17 @@ template <typename Config> class Application
 
     std::string app_name() { return app3_base_configuration_->name(); }
 
+    bool app_alive() { return alive_; }
+
+    boost::units::quantity<boost::units::si::frequency>
+    choose_loop_freq(boost::units::quantity<boost::units::si::frequency> compiled_loop_freq)
+    {
+        if (app3_base_configuration_->has_loop_frequency())
+            return app3_base_configuration_->loop_frequency_with_units();
+        else
+            return compiled_loop_freq;
+    }
+
   protected:
     void configure_geodesy(goby::util::UTMGeodesy::LatLonPoint datum);
 
@@ -134,11 +158,19 @@ template <typename Config> class Application
     template <typename App>
     friend int ::goby::run(
         const goby::middleware::ConfiguratorInterface<typename App::ConfigType>&);
+
+    template <typename App> friend class goby::middleware::julia::ApplicationWrapper;
+    template <typename App> friend class goby::middleware::python::ApplicationWrapper;
+
     // main loop that exits on quit(); returns the desired return value
     int __run();
 
+    void run_one() { run(); }
+
     void configure_logger();
     void configure_glog_file();
+    void configure_intervehicle();
+    void load_shared_libraries();
     void check_rotate_glog_file();
 
   private:
@@ -174,9 +206,15 @@ template <typename Config> goby::middleware::Application<Config>::Application() 
     using goby::glog;
 
     configure_logger();
+
+    load_shared_libraries();
+
     if (app3_base_configuration_->has_geodesy())
         configure_geodesy({app3_base_configuration_->geodesy().lat_origin_with_units(),
                            app3_base_configuration_->geodesy().lon_origin_with_units()});
+
+    if (app3_base_configuration_->has_intervehicle_cfg())
+        configure_intervehicle();
 
     if (!app3_base_configuration_->IsInitialized())
         throw(middleware::ConfigException("Invalid base configuration"));
@@ -204,6 +242,37 @@ template <typename Config> void goby::middleware::Application<Config>::configure
 
     if (app3_base_configuration_->glog_config().show_dccl_log())
         goby::middleware::detail::DCCLSerializerParserHelperBase::setup_dlog();
+}
+
+template <typename Config> void goby::middleware::Application<Config>::load_shared_libraries()
+{
+    using goby::glog;
+    using goby::middleware::detail::DCCLSerializerParserHelperBase;
+
+    try
+    {
+        if (const char* env_libs = getenv("GOBY_LOAD_SHARED_LIBRARY"))
+            DCCLSerializerParserHelperBase::load_library(std::string(env_libs));
+
+        for (const auto& lib : app3_base_configuration_->load_shared_library())
+            DCCLSerializerParserHelperBase::load_library(lib);
+    }
+    catch (const std::exception& e)
+    {
+        glog.is_die() && glog << e.what() << std::endl;
+    }
+}
+
+template <typename Config> void goby::middleware::Application<Config>::configure_intervehicle()
+{
+    const goby::middleware::protobuf::AppConfig::Intervehicle& intervehicle_cfg =
+        app3_base_configuration_->intervehicle_cfg();
+
+    if (intervehicle_cfg.has_dccl_passphrase())
+    {
+        goby::middleware::detail::DCCLSerializerParserHelperBase::set_crypto_passphrase(
+            intervehicle_cfg.dccl_passphrase());
+    }
 }
 
 template <typename Config> void goby::middleware::Application<Config>::check_rotate_glog_file()
@@ -270,11 +339,16 @@ template <typename Config> void goby::middleware::Application<Config>::configure
         std::string file_symlink =
             (file_format % "latest" % app3_base_configuration_->name()).str();
         remove(file_symlink.c_str());
-        int result = symlink(realpath(file_name.c_str(), NULL), file_symlink.c_str());
-        if (result != 0)
-            glog.is_warn() &&
-                glog << "Cannot create symlink to latest file. Continuing onwards anyway"
-                     << std::endl;
+        char* resolved = realpath(file_name.c_str(), nullptr);
+        if (resolved != nullptr)
+        {
+            int result = symlink(resolved, file_symlink.c_str());
+            free(resolved);
+            if (result != 0)
+                glog.is_warn() &&
+                    glog << "Cannot create symlink to latest file. Continuing onwards anyway"
+                         << std::endl;
+        }
     }
 
     glog.add_stream(file_log.verbosity(), fout_.get());
@@ -305,7 +379,7 @@ template <typename Config> int goby::middleware::Application<Config>::__run()
     // continue to run while we are alive (quit() has not been called)
     while (alive_)
     {
-        this->run();
+        this->run_one();
         this->check_rotate_glog_file();
     }
     this->pre_finalize();
@@ -343,20 +417,13 @@ int goby::run(const goby::middleware::ConfiguratorInterface<typename App::Config
             new goby::middleware::protobuf::AppConfig(cfgtor.app_configuration()));
 
         // set up simulation time
-        if (App::app3_base_configuration_->simulation().time().use_sim_time())
-        {
-            goby::time::SimulatorSettings::using_sim_time = true;
-            goby::time::SimulatorSettings::warp_factor =
-                App::app3_base_configuration_->simulation().time().warp_factor();
-            if (App::app3_base_configuration_->simulation().time().has_reference_microtime())
-                goby::time::SimulatorSettings::reference_time =
-                    std::chrono::system_clock::time_point(std::chrono::microseconds(
-                        App::app3_base_configuration_->simulation().time().reference_microtime()));
-        }
+        middleware::detail::configure_simulation_time(*App::app3_base_configuration_);
 
         // instantiate the application (with the configuration already set)
         App app;
         return_value = app.__run();
+        if (return_value == 0 && cfgtor.invalid_command())
+            return_value = EXIT_FAILURE;
     }
     catch (std::exception& e)
     {

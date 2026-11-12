@@ -1,4 +1,4 @@
-// Copyright 2009-2023:
+// Copyright 2009-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -25,8 +25,8 @@
 #ifndef GOBY_MIDDLEWARE_TRANSPORT_INTERVEHICLE_GROUPS_H
 #define GOBY_MIDDLEWARE_TRANSPORT_INTERVEHICLE_GROUPS_H
 
+#include "goby/intervehicle_api_version.h"
 #include "goby/middleware/group.h"
-#include "goby/version.h"
 
 namespace goby
 {

@@ -1,4 +1,4 @@
-// Copyright 2009-2021:
+// Copyright 2009-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -24,7 +24,6 @@
 
 #include "dccl.h"
 
-#include <boost/smart_ptr/shared_ptr.hpp> // for shared_ptr
 #include <dccl/codec.h>                   // for Codec
 
 #include "goby/util/debug_logger/term_color.h" // for Colors, Colors::lt_blue

@@ -10,17 +10,10 @@ endmacro()
 ## find external packages, libraries, and headers for the entire goby project
 #mandatory
 goby_find_required_package(ProtobufGoby)
-include_directories(${PROTOBUF_INCLUDE_DIRS})
+include_directories(${Protobuf_INCLUDE_DIRS})
 
-string(STRIP ${PROTOC_VERSION} PROTOC_VERSION_CLEAN)
-message(STATUS "Using Protocol Buffers ${PROTOC_VERSION_CLEAN}: ${PROTOBUF_INCLUDE_DIRS}")
-
-if(${PROTOC_VERSION} VERSION_LESS 3.0.0) 
-  message(STATUS "\tlibprotobuf < 3.0.0, removing syntax= string")
-  set(PROTOBUF_HAS_SYNTAX_VERSION FALSE PARENT_SCOPE)
-else()
-  set(PROTOBUF_HAS_SYNTAX_VERSION TRUE PARENT_SCOPE)
-endif()
+string(STRIP ${protobuf_VERSION} PROTOC_VERSION_CLEAN)
+message(STATUS "Using Protocol Buffers ${protobuf_VERSION}: ${Protobuf_INCLUDE_DIRS}")
 
 #dccl
 goby_find_required_package(DCCL)
@@ -57,8 +50,6 @@ else()
 endif()
 
 option(enable_janus_acomms "Enable Janus Acomms Driver" OFF)
-
-option(enable_popoto_acomms "Enable Popoto Acomms Driver" OFF)
 
 if(enable_ncurses)
   goby_find_required_package(Curses)  
@@ -108,6 +99,21 @@ endif()
 if(enable_hdf5)
   goby_find_required_package(HDF5)  
   add_definitions(-DHAS_HDF5)
+endif()
+
+## yaml-cpp
+find_package(yaml-cpp QUIET)
+set(YAML_DOC_STRING "Enable YAML test files for 'goby zeromq test' and 'goby udpm test' (requires libyaml-cpp-dev)")
+if(yaml-cpp_FOUND)
+  option(enable_yaml ${YAML_DOC_STRING} ON)
+else()
+  option(enable_yaml ${YAML_DOC_STRING} OFF)
+  message(">> setting enable_yaml to OFF ... if you need this functionality: 1) install libyaml-cpp-dev; 2) run cmake -Denable_yaml=ON")
+endif()
+
+if(enable_yaml)
+  goby_find_required_package(yaml-cpp)
+  add_definitions(-DHAS_YAML_CPP)
 endif()
 
 # OpenSSL
@@ -173,9 +179,21 @@ endif()
 ## LLVM (for goby_clang_tool)
 include(FindLLVMForGoby)
 
-macro(generate_middleware_interfaces target) 
+#latex, for documentation
+find_package(LATEX QUIET)
+set(LATEX_DOC_STRING "Build documentation (requires Doxygen, LaTeX, XeLaTeX, and certain fonts)")
+option(build_doc ${LATEX_DOC_STRING} OFF)
+
+# the *_stub_interface_viz targets require graphviz's 'dot' to render the interface
+# diagrams into images, so only build them (and thus require graphviz) as part of the
+# documentation build, not the default build
+macro(generate_middleware_interfaces target)
   if(enable_llvm)
-    goby_export_interface(${target} ${goby_INTERFACES_DIR} "${CMAKE_BINARY_DIR}/share/goby/doc/html/images" ${target}_YML_OUT)
+    if(build_doc)
+      goby_export_interface(${target} ${goby_INTERFACES_DIR} "${CMAKE_BINARY_DIR}/share/goby/doc/html/images" ${target}_YML_OUT)
+    else()
+      goby_export_interface(${target} ${goby_INTERFACES_DIR} "" ${target}_YML_OUT)
+    endif()
   endif()
 endmacro()
 
@@ -210,10 +228,21 @@ macro(goby_install_lib target_lib component)
 endmacro()
 
 ## boost
-goby_find_required_package(Boost 1.58.0 COMPONENTS system date_time program_options filesystem)
-include_directories(${Boost_INCLUDE_DIRS})
+set(BOOST_COMPONENTS date_time program_options)
+find_package(Boost 1.58.0 REQUIRED)
+if(Boost_VERSION VERSION_GREATER_EQUAL 1.86.0)
+  # boost process is no longer header only in 1.86+
+  list(APPEND BOOST_COMPONENTS process)
+endif()
+goby_find_required_package(Boost 1.58.0 REQUIRED COMPONENTS ${BOOST_COMPONENTS})
 
-protobuf_generate_cpp(BASE_PROTO_SRCS BASE_PROTO_HDRS 
+# Used by goby-config.cmake.in
+set(Boost_VERSION "${Boost_VERSION}" PARENT_SCOPE)
+set(BOOST_COMPONENTS "${BOOST_COMPONENTS}" PARENT_SCOPE)
+
+include_directories(SYSTEM ${Boost_INCLUDE_DIRS})
+
+protobuf_generate_cpp_dccl(BASE_PROTO_SRCS BASE_PROTO_HDRS 
   protobuf/option_extensions.proto
   )
 
@@ -222,13 +251,15 @@ include(acomms/src.cmake)
 include(util/src.cmake)
 include(time/src.cmake)
 include(middleware/src.cmake)
+include(udpm/src.cmake)
+
+# transport-neutral tools (goby test) describe zeromq endpoints without linking goby_zeromq
+protobuf_generate_cpp_dccl(ZEROMQ_CONFIG_PROTO_SRCS ZEROMQ_CONFIG_PROTO_HDRS
+  zeromq/protobuf/interprocess_config.proto
+  )
 
 if(NOT enable_janus_acomms)
   list(FILTER ACOMMS_SRC EXCLUDE REGEX ".*janus_driver.cpp")
-endif()
-
-if(NOT enable_popoto_acomms)
-  list(FILTER ACOMMS_SRC EXCLUDE REGEX ".*popoto_driver.cpp")
 endif()
 
 add_library(goby
@@ -237,6 +268,8 @@ add_library(goby
   ${UTIL_SRC}
   ${TIME_SRC}
   ${MIDDLEWARE_SRC}
+  ${UDPM_SRC}
+  ${ZEROMQ_CONFIG_PROTO_SRCS} ${ZEROMQ_CONFIG_PROTO_HDRS}
   )
 
 
@@ -244,25 +277,10 @@ target_link_libraries(goby
   dccl
   dccl_arithmetic
   ${Boost_LIBRARIES}
-  boost_filesystem
-  boost_program_options
-  boost_date_time
-  ${PROTOBUF_LIBRARY}
+  protobuf::libprotobuf
   ${PROJ_LIBRARY}
   )
 
-if (enable_popoto_acomms)
-  if(NOT POPOTO_ROOT_DIR)
-    message(FATAL_ERROR "You must set POPOTO_ROOT_DIR to the Top level directory for Popoto API (cmake -DPOPOTO_ROOT_DIR=/path/to/PopotoAPI/CPP/popoto_client)")
-  endif()
-  
-  target_include_directories(goby SYSTEM PUBLIC ${POPOTO_ROOT_DIR}/include)
-
-  add_definitions(-DENABLE_POPOTO_ACOMMS)
-  target_link_libraries(goby
-    ${POPOTO_ROOT_DIR}/build/libpopoto_api.a
-  )
-endif()
 
 if(enable_janus_acomms)
   if(NOT JANUS_ROOT_DIR)
@@ -329,6 +347,35 @@ if(build_zeromq)
   export(TARGETS ${GOBY_ZEROMQ_LIBRARY_LIST} FILE ${CMAKE_BINARY_DIR}/goby_zeromq-config.cmake)
 endif()
 
+## zenoh
+find_package(zenohc QUIET CONFIG)
+find_package(zenohcxx QUIET CONFIG)
+set(ZENOH_DOC_STRING "Enable Zenoh Transport Layer components (requires libzenohc-dev and libzenohcpp-dev: https://zenoh.io/)")
+if(zenohc_FOUND AND zenohcxx_FOUND)
+  option(build_zenoh ${ZENOH_DOC_STRING} ON)
+else()
+  option(build_zenoh ${ZENOH_DOC_STRING} OFF)
+  message(">> setting build_zenoh to OFF ... if you need this functionality: 1) install libzenohc-dev and libzenohcpp-dev from https://download.eclipse.org/zenoh/debian-repo/ (or run './DEPENDENCIES -z'); 2) run cmake -Dbuild_zenoh=ON")
+endif()
+
+if(build_zenoh)
+  # zenohcxx is header only and packaged Architecture: all, but its CMake configuration declares
+  # the pointer size of the machine it was built on, so CMake rejects it on a 32-bit build
+  if(NOT zenohcxx_FOUND AND CMAKE_SIZEOF_VOID_P AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "build_zenoh requires a 64-bit target: the packaged zenohcxx CMake configuration is marked 64-bit only, so it cannot be used for this ${CMAKE_SIZEOF_VOID_P}-byte-pointer build")
+  endif()
+
+  goby_find_required_package(zenohc CONFIG)
+  goby_find_required_package(zenohcxx CONFIG)
+
+  add_subdirectory(zenoh)
+
+  #export config for goby_zenoh libraries
+  install(EXPORT goby_zenoh-config DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/goby)
+  #configuration export - local build version
+  export(TARGETS ${GOBY_ZENOH_LIBRARY_LIST} FILE ${CMAKE_BINARY_DIR}/goby_zenoh-config.cmake)
+endif()
+
 ## MOOS 
 #first try to find v10 MOOS
 find_package(MOOS 10 QUIET NO_MODULE)
@@ -356,11 +403,6 @@ if(build_moos)
   #configuration export - local build version
   export(TARGETS ${GOBY_MOOS_LIBRARY_LIST} FILE ${CMAKE_BINARY_DIR}/goby_moos-config.cmake)
 endif(build_moos)
-
-#latex, for documentation
-find_package(LATEX QUIET)
-set(LATEX_DOC_STRING "Build documentation (requires Doxygen, LaTeX, XeLaTeX, and certain fonts)")
-option(build_doc ${LATEX_DOC_STRING} OFF)
 
 if(build_doc)
   add_subdirectory(doc)

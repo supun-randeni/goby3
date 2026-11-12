@@ -1,4 +1,4 @@
-// Copyright 2013-2025:
+// Copyright 2013-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -30,7 +30,6 @@
 #include <string> // for string
 
 #include <boost/signals2/signal.hpp>      // for signal
-#include <boost/smart_ptr/shared_ptr.hpp> // for shared_ptr
 
 #include "goby/middleware/protobuf/frontseat.pb.h"        // for InterfaceS...
 #include "goby/middleware/protobuf/frontseat_config.pb.h" // for Config

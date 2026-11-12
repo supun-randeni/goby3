@@ -31,15 +31,31 @@ message GobyToolConfig
             short_help_msg: "Manage goby log files",
         }];
         launch = 2 [(goby.ev).cfg = {
-            short_help_msg: "Launch goby *.launch files",
+            short_help_msg: "Launch goby *.launch files, or a platform of a deployment file (goby launch fleet.yml --platform bot1)",
             external_command: "goby_launch"
             include_binary_flag: false
+        }];
+        test = 3 [(goby.ev).cfg = {
+            short_help_msg: "Run, validate or visualize publish/subscribe test files",
+            external_command: "goby_test_tool"
+        }];
+        interface = 4 [(goby.ev).cfg = {
+            short_help_msg: "Visualize the publish/subscribe interfaces of a deployment",
+            external_command: "goby_interface_tool"
         }];
 
         // middleware/transport
         zeromq = 10 [(goby.ev).cfg = {
             short_help_msg: "Interact with ZeroMQ Goby pub/sub",
             external_command: "goby_zeromq_tool"
+        }];
+        udpm = 11 [(goby.ev).cfg = {
+            short_help_msg: "Interact with UDPM Goby pub/sub",
+            external_command: "goby_udpm_tool"
+        }];
+        zenoh = 12 [(goby.ev).cfg = {
+            short_help_msg: "Interact with Zenoh Goby pub/sub",
+            external_command: "goby_zenoh_tool"
         }];
 
         // middleware/marshalling

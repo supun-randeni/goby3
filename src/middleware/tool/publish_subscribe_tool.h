@@ -1,0 +1,318 @@
+// Copyright 2026:
+//   GobySoft, LLC (2013-)
+//   Community contributors (see AUTHORS file)
+// File authors:
+//   Toby Schneider <toby@gobysoft.org>
+//
+//
+// This file is part of the Goby Underwater Autonomy Project Libraries
+// ("The Goby Libraries").
+//
+// The Goby Libraries are free software: you can redistribute them and/or modify
+// them under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 2.1 of the License, or
+// (at your option) any later version.
+//
+// The Goby Libraries are distributed in the hope that they will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with Goby.  If not, see <http://www.gnu.org/licenses/>.
+
+#ifndef GOBY_MIDDLEWARE_TOOL_PUBLISH_SUBSCRIBE_TOOL_H
+#define GOBY_MIDDLEWARE_TOOL_PUBLISH_SUBSCRIBE_TOOL_H
+
+#include <chrono>
+#include <map>
+#include <memory>
+#include <regex>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <google/protobuf/text_format.h>
+
+#include "dccl/dynamic_protobuf_manager.h"
+
+#include "goby/middleware/log/dccl_log_plugin.h"
+#include "goby/middleware/log/json_log_plugin.h"
+#include "goby/middleware/log/log_entry.h"
+#include "goby/middleware/log/log_plugin.h"
+#include "goby/middleware/log/protobuf_log_plugin.h"
+#include "goby/middleware/marshalling/interface.h"
+#include "goby/middleware/marshalling/json.h"
+#include "goby/middleware/marshalling/protobuf.h"
+#include "goby/time/convert.h"
+#include "goby/util/debug_logger.h"
+#include "goby/util/debug_logger/flex_ostream.h"
+
+// after the marshalling headers: the transporters they pull in resolve scheme<Data>() at
+// template definition, so each scheme must already be declared
+#include "goby/middleware/application/single_thread.h"
+#include "goby/middleware/application/tool.h"
+
+namespace goby
+{
+namespace middleware
+{
+namespace tool
+{
+
+/// \brief Split a publish type specification into marshalling scheme and type name.
+///
+/// \param spec e.g. "PROTOBUF/NavigationReport", "DCCL/NavigationReport", "JSON/NavigationReport",
+///        "JSON", or a name containing "protobuf." (implies PROTOBUF)
+/// \param scheme Set to the scheme, or 0 if \p spec does not name one
+/// \param type Set to the type name (empty for generic JSON)
+/// \throw std::invalid_argument if the scheme prefix is not a known scheme name or number
+inline void parse_publish_type(const std::string& spec, int& scheme, std::string& type)
+{
+    scheme = 0;
+    type.clear();
+    std::string::size_type slash_pos = spec.find('/');
+    if (slash_pos == std::string::npos)
+    {
+        if (spec == "JSON")
+        {
+            scheme = goby::middleware::MarshallingScheme::JSON;
+        }
+        else if (spec.find("protobuf.") != std::string::npos)
+        {
+            scheme = goby::middleware::MarshallingScheme::PROTOBUF;
+            type = spec;
+        }
+    }
+    else
+    {
+        scheme = goby::middleware::MarshallingScheme::from_string(spec.substr(0, slash_pos));
+        type = spec.substr(slash_pos + 1);
+    }
+}
+
+/// \brief Publish a single message on the interprocess layer using the provided publish config.
+///
+/// \tparam InterprocessType Transport-specific interprocess portal type
+/// \tparam PublishConfig Config type with group(), type(), value(), and load_shared_library()
+///         accessors (e.g. goby::middleware::protobuf::PublishToolConfig or a superset)
+/// \param interprocess Reference to the interprocess portal
+/// \param cfg Publish configuration
+/// \param tool_name Name of the tool for error messages (e.g. "goby zeromq publish")
+template <typename InterprocessType, typename PublishConfig>
+void publish_tool_impl(InterprocessType& interprocess, const PublishConfig& cfg,
+                       const std::string& tool_name)
+{
+    using goby::glog;
+    std::string type;
+    int scheme{0};
+    parse_publish_type(cfg.type(), scheme, type);
+
+    goby::middleware::DynamicGroup group(cfg.group());
+    switch (scheme)
+    {
+        case goby::middleware::MarshallingScheme::DCCL:
+        case goby::middleware::MarshallingScheme::PROTOBUF:
+        {
+            // use TextFormat
+            auto pb_msg = dccl::DynamicProtobufManager::new_protobuf_message<
+                std::shared_ptr<google::protobuf::Message>>(type);
+            google::protobuf::TextFormat::Parser parser;
+            goby::util::FlexOStreamErrorCollector error_collector(cfg.value());
+            parser.RecordErrorsTo(&error_collector);
+            parser.AllowPartialMessage(false);
+            parser.ParseFromString(cfg.value(), pb_msg.get());
+
+            if (scheme == goby::middleware::MarshallingScheme::DCCL)
+                interprocess.template publish_dynamic<google::protobuf::Message,
+                                                      goby::middleware::MarshallingScheme::DCCL>(
+                    pb_msg, group);
+            else if (scheme == goby::middleware::MarshallingScheme::PROTOBUF)
+                interprocess.template publish_dynamic<
+                    google::protobuf::Message, goby::middleware::MarshallingScheme::PROTOBUF>(
+                    pb_msg, group);
+            break;
+        }
+
+        case goby::middleware::MarshallingScheme::JSON:
+        {
+            auto j = nlohmann::json::parse(cfg.value());
+            if (type.empty() || type == "nlohmann::json")
+            {
+                interprocess.template publish_dynamic<nlohmann::json>(j, group);
+            }
+            else
+            {
+                // allow for specialized types, e.g. goby_json_type = "NavigationReport";
+                std::vector<char> bytes = goby::middleware::SerializerParserHelper<
+                    nlohmann::json, goby::middleware::MarshallingScheme::JSON>::serialize(j);
+
+                interprocess.publish_serialized(type, goby::middleware::MarshallingScheme::JSON,
+                                                bytes, group);
+            }
+
+            break;
+        }
+
+        default:
+            glog.is_die() && glog << "Scheme " << scheme << " is not implemented for '" << tool_name
+                                  << "'" << std::endl;
+    }
+}
+
+/// \brief Set up subscriptions for the interprocess subscribe tool.
+///
+/// \tparam InterprocessType Transport-specific interprocess portal type
+/// \tparam SubscribeConfig Config type with group_regex(), type_regex(), scheme(),
+///         has_scheme(), include_internal_groups() accessors
+/// \param interprocess Reference to the interprocess portal
+/// \param cfg Subscribe configuration
+/// \param plugins Map of scheme->LogPlugin for deserializing messages
+/// \param internal_group_regex Regex pattern for internal groups to filter unless
+///        include_internal_groups() is set. Pass empty string to disable filtering.
+template <typename InterprocessType, typename SubscribeConfig>
+void subscribe_tool_impl(InterprocessType& interprocess, const SubscribeConfig& cfg,
+                         std::map<int, std::unique_ptr<goby::middleware::log::LogPlugin>>& plugins,
+                         const std::string& internal_group_regex = "")
+{
+    std::set<int> schemes{goby::middleware::MarshallingScheme::ALL_SCHEMES};
+
+    if (cfg.has_scheme())
+    {
+        int scheme = goby::middleware::MarshallingScheme::from_string(cfg.scheme());
+        schemes = {scheme};
+    }
+
+    plugins[goby::middleware::MarshallingScheme::PROTOBUF] =
+        std::make_unique<goby::middleware::log::ProtobufPlugin>();
+    plugins[goby::middleware::MarshallingScheme::DCCL] =
+        std::make_unique<goby::middleware::log::DCCLPlugin>();
+    plugins[goby::middleware::MarshallingScheme::JSON] =
+        std::make_unique<goby::middleware::log::JSONPlugin>();
+
+    interprocess.subscribe_regex(
+        [&cfg, &plugins, internal_group_regex](const std::vector<unsigned char>& bytes, int scheme,
+                                               const std::string& type,
+                                               const goby::middleware::Group& group)
+        {
+            if (!internal_group_regex.empty())
+            {
+                std::regex exclude_pattern(internal_group_regex);
+                if (std::regex_match(std::string(group), exclude_pattern) &&
+                    !cfg.include_internal_groups())
+                    return;
+            }
+
+            goby::middleware::log::LogEntry log_entry(bytes, scheme, type, group);
+            std::string debug_text;
+
+            auto plugin = plugins.find(log_entry.scheme());
+            if (plugin == plugins.end())
+            {
+                debug_text = std::string("Message of " + std::to_string(bytes.size()) + " bytes");
+            }
+            else
+            {
+                try
+                {
+                    debug_text = plugin->second->debug_text_message(log_entry);
+                }
+                catch (goby::middleware::log::LogException& e)
+                {
+                    debug_text = "Unable to parse message of " +
+                                 std::to_string(log_entry.data().size()) +
+                                 " bytes. Reason: " + e.what();
+                }
+            }
+
+            // use similar format to goby_log_tool DEBUG_TEXT
+            std::cout << scheme << " | " << group << " | " << type << " | "
+                      << goby::time::convert<boost::posix_time::ptime>(log_entry.timestamp())
+                      << " | " << debug_text << std::endl;
+        },
+        schemes, cfg.type_regex(), cfg.group_regex());
+}
+
+/// \brief Application implementing "goby <impl> publish" for a given interprocess implementation.
+///
+/// \tparam ImplementationTag Tag selecting the interprocess implementation
+///         (e.g. udpm::detail::InterProcessTag)
+/// \tparam PublishConfig Config type accepted by publish_tool_impl()
+template <typename ImplementationTag, typename PublishConfig>
+class PublishToolApplication
+    : public middleware::SingleThreadApplicationFor<PublishConfig, ImplementationTag>,
+      public middleware::ToolSharedLibraryLoader
+{
+    using Base = middleware::SingleThreadApplicationFor<PublishConfig, ImplementationTag>;
+    using Traits = middleware::detail::implementation_traits<ImplementationTag>;
+
+  public:
+    PublishToolApplication()
+        : Base(10.0 * boost::units::si::hertz),
+          middleware::ToolSharedLibraryLoader(this->app_cfg().load_shared_library()),
+          publish_time_(std::chrono::steady_clock::now() +
+                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(this->cfg().settle_seconds())))
+    {
+        _publish_once_settled();
+    }
+    ~PublishToolApplication() override = default;
+
+  private:
+    void loop() override
+    {
+        if (!published_)
+            _publish_once_settled();
+        else if (std::chrono::steady_clock::now() >= quit_time_)
+            this->quit(0);
+    }
+
+    // a transport that routes only to the subscribers it has already discovered needs the settle
+    // time before the publish, and every transport needs a moment after it for the publish to go
+    // through
+    void _publish_once_settled()
+    {
+        if (std::chrono::steady_clock::now() < publish_time_)
+            return;
+
+        publish_tool_impl(this->interprocess(), this->cfg(),
+                          std::string("goby ") + Traits::name + " publish");
+        published_ = true;
+        quit_time_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    }
+
+    const std::chrono::steady_clock::time_point publish_time_;
+    std::chrono::steady_clock::time_point quit_time_;
+    bool published_{false};
+};
+
+/// \brief Application implementing "goby <impl> subscribe" for a given interprocess implementation.
+///
+/// \tparam ImplementationTag Tag selecting the interprocess implementation
+///         (e.g. udpm::detail::InterProcessTag)
+/// \tparam SubscribeConfig Config type accepted by subscribe_tool_impl()
+template <typename ImplementationTag, typename SubscribeConfig>
+class SubscribeToolApplication
+    : public middleware::SingleThreadApplicationFor<SubscribeConfig, ImplementationTag>,
+      public middleware::ToolSharedLibraryLoader
+{
+    using Traits = middleware::detail::implementation_traits<ImplementationTag>;
+
+  public:
+    SubscribeToolApplication()
+        : middleware::ToolSharedLibraryLoader(this->app_cfg().load_shared_library())
+    {
+        subscribe_tool_impl(this->interprocess(), this->cfg(), plugins_,
+                            std::string("goby::") + Traits::name + "::_internal.*");
+    }
+    ~SubscribeToolApplication() override = default;
+
+  private:
+    std::map<int, std::unique_ptr<goby::middleware::log::LogPlugin>> plugins_;
+};
+
+} // namespace tool
+} // namespace middleware
+} // namespace goby
+
+#endif

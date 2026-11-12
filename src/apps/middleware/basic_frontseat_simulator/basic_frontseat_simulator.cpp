@@ -1,4 +1,4 @@
-// Copyright 2013-2025:
+// Copyright 2013-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -29,6 +29,7 @@
 // 2. run goby_frontseat_interface or iFrontSeat connecting to that port
 
 #include <cmath>       // for isnan, cos, sin
+#include <chrono>      // for chrono::seconds
 #include <cstdlib>     // for exit, abs
 #include <iomanip>     // for operator<<, set...
 #include <iostream>    // for operator<<, bas...
@@ -37,8 +38,9 @@
 #include <memory>      // for unique_ptr
 #include <stdexcept>   // for runtime_error
 #include <string>      // for string, basic_s...
+#include <thread>      // for this_thread::sleep_for
 #include <type_traits> // for __decay_and_str...
-#include <unistd.h>    // for sleep, usleep
+#include <unistd.h>    // for usleep
 #include <utility>     // for pair, make_pair
 #include <vector>      // for vector
 
@@ -105,7 +107,7 @@ int main(int argc, char* argv[])
     goby::util::TCPServer server(goby::util::as<unsigned>(argv[1]));
     server.start();
 
-    while (!server.active()) sleep(1);
+    while (!server.active()) std::this_thread::sleep_for(std::chrono::seconds(1));
 
     while (server.active())
     {
@@ -252,15 +254,13 @@ void compute_state()
     else
         vehicle_.z = desired_.z;
 
-    if ((vehicle_.hdg - desired_.hdg) >= 180)
-        desired_.hdg += 360;
-    if ((vehicle_.hdg - desired_.hdg) < -180)
-        desired_.hdg -= 360;
-
-    if (std::abs(vehicle_.hdg - desired_.hdg) > vcfg_.hdg_rate * dt)
-        vehicle_.hdg += (vehicle_.hdg < desired_.hdg) ? vcfg_.hdg_rate * dt : -vcfg_.hdg_rate * dt;
+    // shortest turn, in [-180, 180]
+    const double hdg_error = std::remainder(desired_.hdg - vehicle_.hdg, 360.0);
+    if (std::abs(hdg_error) > vcfg_.hdg_rate * dt)
+        vehicle_.hdg += std::copysign(vcfg_.hdg_rate * dt, hdg_error);
     else
-        vehicle_.hdg = desired_.hdg;
+        vehicle_.hdg += hdg_error;
+    vehicle_.hdg = std::fmod(std::fmod(vehicle_.hdg, 360.0) + 360.0, 360.0);
 
     if (std::abs(vehicle_.v - desired_.v) > vcfg_.a * dt)
         vehicle_.v += (vehicle_.v < desired_.v) ? vcfg_.a * dt : -vcfg_.a * dt;

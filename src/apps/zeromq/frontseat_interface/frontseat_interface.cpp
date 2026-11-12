@@ -1,4 +1,4 @@
-// Copyright 2020-2021:
+// Copyright 2020-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -95,7 +95,10 @@ int main(int argc, char* argv[])
     {
         std::cerr << "Loading frontseat driver library: " << driver_lib_path << std::endl;
         goby::apps::zeromq::FrontSeatInterface::driver_library_handle_ =
-            dlopen(driver_lib_path, RTLD_LAZY);
+            // RTLD_NODELETE: keep the library mapped for the life of the process (even if
+            // dlclose() is called) as the protobuf descriptor pools may reference memory
+            // (e.g. custom options extensions) owned by this library at static destruction
+            dlopen(driver_lib_path, RTLD_LAZY | RTLD_NODELETE);
         if (!goby::apps::zeromq::FrontSeatInterface::driver_library_handle_)
         {
             std::cerr << "Failed to open library: " << driver_lib_path << std::endl;
@@ -131,7 +134,8 @@ load_driver(const goby::apps::zeromq::protobuf::FrontSeatInterfaceConfig& cfg)
     }
 
     auto frontseat_cfg = cfg.frontseat_cfg();
-    frontseat_cfg.set_name(cfg.interprocess().platform());
+    if (!frontseat_cfg.has_name())
+        frontseat_cfg.set_name(cfg.interprocess().platform());
     frontseat_cfg.mutable_origin()->set_lat_with_units(cfg.app().geodesy().lat_origin_with_units());
     frontseat_cfg.mutable_origin()->set_lon_with_units(cfg.app().geodesy().lon_origin_with_units());
 

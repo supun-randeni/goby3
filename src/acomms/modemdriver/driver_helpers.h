@@ -1,4 +1,4 @@
-// Copyright 2024-2025:
+// Copyright 2024-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -45,5 +45,6 @@ enum GobyHeaderBits
     GOBY_HEADER_TYPE = 0,       // 0 == Data, 1 == Ack
     GOBY_HEADER_ACK_REQUEST = 1 // 0 == no ack requested, 1 == ack requested
 };
+
 }
 } // namespace goby

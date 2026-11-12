@@ -1,4 +1,4 @@
-// Copyright 2020-2021:
+// Copyright 2020-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -107,7 +107,10 @@ int main(int argc, char* argv[])
     if (plugin_path)
     {
         std::cerr << "Loading plugin library: " << plugin_path << std::endl;
-        plugin_handle = dlopen(plugin_path, RTLD_LAZY);
+        // RTLD_NODELETE: keep the library mapped for the life of the process (even if
+        // dlclose() is called) as the protobuf descriptor pools may reference memory
+        // (e.g. custom options extensions) owned by this library at static destruction
+        plugin_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_NODELETE);
         if (!plugin_handle)
         {
             std::cerr << "Failed to open library: " << plugin_path << std::endl;

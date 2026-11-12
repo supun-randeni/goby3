@@ -1,4 +1,4 @@
-// Copyright 2017-2024:
+// Copyright 2017-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -26,6 +26,7 @@
 #include <atomic>        // for atomic
 #include <chrono>        // for time_p...
 #include <csignal>       // for sigaction
+#include <cstdlib>       // for free, realpath
 #include <dlfcn.h>       // for dlclose
 #include <fcntl.h>       // for S_IRGRP
 #include <fstream>       // for operat...
@@ -88,7 +89,10 @@ class Logger : public goby::zeromq::SingleThreadApplication<protobuf::LoggerConf
 
         for (const auto& lib : cfg().load_shared_library())
         {
-            void* lib_handle = dlopen(lib.c_str(), RTLD_LAZY);
+            // RTLD_NODELETE: keep the library mapped for the life of the process (even if
+            // dlclose() is called) as the protobuf descriptor pools may reference memory
+            // (e.g. custom options extensions) owned by this library at static destruction
+            void* lib_handle = dlopen(lib.c_str(), RTLD_LAZY | RTLD_NODELETE);
             if (!lib_handle)
                 glog.is_die() && glog << "Failed to open library: " << lib << std::endl;
             dl_handles_.push_back(lib_handle);
@@ -171,11 +175,16 @@ class Logger : public goby::zeromq::SingleThreadApplication<protobuf::LoggerConf
         {
             std::string file_symlink = log_file_base_ + "_latest.goby";
             remove(file_symlink.c_str());
-            int result = symlink(realpath(log_file_path_.c_str(), NULL), file_symlink.c_str());
-            if (result != 0)
-                glog.is_warn() &&
-                    glog << "Cannot create symlink to latest file. Continuing onwards anyway"
-                         << std::endl;
+            char* resolved = realpath(log_file_path_.c_str(), nullptr);
+            if (resolved != nullptr)
+            {
+                int result = symlink(resolved, file_symlink.c_str());
+                free(resolved);
+                if (result != 0)
+                    glog.is_warn() &&
+                        glog << "Cannot create symlink to latest file. Continuing onwards anyway"
+                             << std::endl;
+            }
         }
     }
 

@@ -1,5 +1,166 @@
 # Goby Release Notes (Major version 3)
 
+## Version 3.7.0
+
+### Middleware
+
+- Added `goby::middleware::detail::implementation_traits`, which maps an interprocess `ImplementationTag` to the portal that implements it, its configuration type and its short name, so that generic code can be written against a tag alone. Each implementation specializes it alongside its portal.
+- Added `SingleThreadApplicationFor` and `MultiThreadApplicationFor`, which select the interprocess implementation by tag as `SimpleThread` already did, rather than by portal template.
+- Factored the `goby <impl> publish` and `goby <impl> subscribe` applications into `goby::middleware::tool::PublishToolApplication` and `SubscribeToolApplication`, removing the near-identical copies carried by `goby_zeromq_tool` and `goby_udpm_tool`. `goby <impl> publish` takes `--settle_seconds`, the time to wait before publishing; it defaults to 0 for ZeroMQ and UDPM.
+- Factored the Poller wakeup handshake into `goby::middleware::detail::notify_poller()`, used by the interthread subscription store and by the UDPM and Zenoh portals: take the poll mutex, then signal the condition variable. The ZeroMQ read thread cannot block on that mutex, since the main thread may hold it while waiting on the read thread's reply to a subscribe request, so it tries the mutex instead and retries from its poll loop while the mutex is held.
+
+### Interface tools
+
+- Added `goby interface visualize`, which draws a deployment's publish/subscribe graph from the interface files `goby_clang_tool -gen` writes, as Graphviz or (`--format D2`) as a D2 diagram that defines its styles once as classes and is about a third the size. It needs only yaml-cpp, so it is built without LLVM. `goby_clang_tool -viz` remains and draws the same graph from the same code, which now lives in `goby/middleware/tool/interface/`.
+- Added `goby interface launch`, which writes `goby_launch` files from a deployment's `run` lists (#452): processes as well as Goby applications, each with its `exec`, `config`, `args`, `env`, `kill`, a `when` condition, and platform `defaults`; `gobyd`'s hold and `goby_coroner`'s expected names derived from the deployment with `auto`. `goby launch <deployment>.yml --platform <name>` writes and runs one. `goby interface launch_check` compares a hand-written launch file with the deployment, and `validate` reports launch-order, hold and expected-list problems.
+- Added `goby interface systemd`, which writes systemd units from the same `run` lists (#453): a service per entry and a `<deployment>-<platform>.target`, with `systemd:` settings (user, group, extra unit text, a project unit template, `skip`) per entry or as platform defaults. `--check` compares them with the installed units. It writes files only; installing and reloading them is left to the project.
+- `goby interface visualize` draws Goby's own applications compactly: `gobyd` as a label on its platform or module, other `goby_*` applications as one box with only their connections to the project's applications, and Goby's internal groups and threads hidden (`--expand_goby_apps` or `--include_all` draws them). Lambda threads are named by file and line, and template arguments are left out of thread names (both in full in the tooltip).
+- Added `goby interface list`, `explain`, `diff` and `init`: an inventory of a deployment's applications, platforms or groups; who publishes and subscribes to a group and why a subscription has no publisher; the connections and requirements that change between two deployments or two builds' interface files; and a starting deployment file from a directory of interface files.
+- Added `goby interface validate`, which checks that every required subscription in a deployment has a publisher in scope, with human or JSON output. `goby_validate_interfaces()` (from `find_package(GOBY)`) runs it as a CTest test.
+- Deployment files can list what each platform or module `run`s by application name; the interface files are found beside the deployment, then with `-I` or `GOBY_INTERFACE_PATH`, then in Goby's own `share/goby/interfaces`. `plugins`, `name` and `file` handle plugins, repeated applications and files off the search path. The `interfaces:` file list still works.
+- `subscribe_dynamic()` and `subscribe_type_regex()` take a `Necessity` template parameter, as `subscribe()` does, so subscriptions made through them can be required. It defaults to `OPTIONAL`. Python and Julia `interface.yml` subscriptions take `necessity: required|recommended|optional`.
+- `goby_clang_tool -gen` records `publish_dynamic()` and `subscribe_dynamic()` calls on a `DynamicGroup` (#343), following the group back to a literal, a member's initializer, a variable, a helper function or a smart pointer's `reset()`. A numeric part set at run time is recorded as `numeric: runtime`, and a group it cannot determine as `"*"` with the C++ expression.
+- Deployment files can `bind` a dynamic group's run-time numeric (or say what a fully dynamic group stands for), give a platform `instances` (one per vehicle), and override subscriptions' `necessity`. `goby interface validate` reports unbound and unresolved dynamic groups, and unused binds and overrides; `--assume_dynamic` counts an unbound dynamic publisher as meeting a requirement. Dynamic connections are drawn dashed.
+- A type-regex subscription now matches any type published to its group in `goby_clang_tool` and `goby interface` output, since the regex is known only at run time.
+
+### Language bindings
+
+- `goby_gen_cpp` (Python) and `goby_gen_cpp` / `goby_gen_julia` (Julia) no longer print a "Generating ... from ..." line for each file they write, so a build that generates bindings is quiet. `--verbose` (Python) or `verbose=true` (Julia) prints them.
+
+### Bugs
+
+- Fixed interprocess connections in deployment diagrams crossing module boundaries. Each module is its own `gobyd`, so an interprocess publication now reaches only subscribers in its own module; intermodule still spans the platform. Previously such edges were drawn to a node in the publisher's module that did not exist.
+- Fixed `goby_clang_tool -viz --omit-interthread` drawing every interthread subscription as unpublished, and `-omit-node-regex` leaving edges to omitted nodes.
+- Fixed a lost wakeup in the ZeroMQ interprocess portal. Its read thread signalled the Poller's condition variable without first taking the poll mutex, so a signal raised between the poller's last unsuccessful poll and its `wait()` had no waiter and was dropped, leaving data sitting in the inproc socket until some later event polled it. Applications that poll without a loop frequency (`loop_freq_hertz` of 0, which never times out) were the most exposed. The interthread layer and the UDPM portal already took the mutex.
+
+### Zenoh Support
+
+Goby's interprocess and intermodule layers can now use [Zenoh](https://zenoh.io) as an alternative to ZeroMQ and UDP Multicast. Enable with `-Dbuild_zenoh=ON` (requires `libzenohc-dev` and `libzenohcpp-dev`; see `DEPENDENCIES -z`).
+
+- Like UDPM and unlike ZeroMQ, the Zenoh portal is peer-to-peer and needs no broker; unlike UDPM, subscriptions are filtered at the source rather than every process parsing every message, and Zenoh handles fragmentation and reliability itself.
+- A Goby identifier maps onto the key expression `<key_prefix>/<platform>/<layer>/<group>/<scheme>/<type>/<process>/<thread>`, with the payload carrying only the serialized bytes. Characters Zenoh cannot represent in a key expression chunk are percent-encoded, and an empty component, which Zenoh forbids, becomes a chunk of its own.
+- The interprocess and intermodule layers share one key space, told apart by the layer chunk, where the other two implementations need a second port or socket. Each portal opens its own session.
+- The hold is implemented with Zenoh liveliness tokens, so it needs no broker: `interprocess { hold { required_client: ... } }` buffers publications until every named client has called `ready()`, and a client that dies drops its token on its own. Waiters subscribe to the token space with history enabled, so a client that was ready first is still seen. Once the last required client is ready the portal waits `hold.settle_seconds` (1 by default) before flushing, as the ZeroMQ portal does, since a client's token can arrive ahead of its subscriptions.
+- `goby_zenoh_tool` provides `goby zenoh publish` and `goby zenoh subscribe`, as `goby_udpm_tool` and `goby_zeromq_tool` do for their transports. `goby zenoh publish` waits `--settle_seconds` (1 by default) before publishing, since Zenoh routes a publication only to the subscribers its session has already discovered.
+- Downstream projects reach the library with `find_package(GOBY 3.0 ... zenoh)`, as for `zeromq` and `moos`; `goby_zenoh` links Zenoh's imported targets, so the package configuration resolves those first.
+
+### Build
+
+- `DEPENDENCIES -z` installs the Zenoh dependencies, adding Eclipse's Debian repository (https://download.eclipse.org/zenoh/debian-repo/) rather than mirroring Zenoh into packages.gobysoft.org. Nothing is added to apt unless `-z` is given, or `-a`, which resolves the full Build-Depends list and so needs the repository too.
+
+### Documentation
+
+- Added `doc990_v4_cleanup.md`, a running list of cleanups that have to wait for Goby 4 because they break released API, ABI or the configuration command line.
+- Added `doc750_zenoh.md`, covering the Zenoh transport's configuration, key expression layout and hold.
+
+## Version 3.6.1
+
+### Middleware
+
+- Send less DCCL metadata on intervehicle publications to avoid excessive memory use on startup, particularly on embedded systems at higher warp settings.
+
+## Version 3.6.0
+
+The release focuses on non-C++ language bindings: Python (new) and updates to Julia.
+
+### Python Support (new)
+
+- Goby applications can now be written in Python, using pybind11 to wrap the C++ implementation. Enable with `-Dbuild_python=ON` (requires `pybind11-dev`). For usage, see [Python examples](https://github.com/GobySoft/goby3-examples/tree/main/src/interprocess/zeromq/python).
+
+### Julia Support
+
+- The `interface.yml` format is now specified in `share/goby/interface` and shared with Python
+
+### Middleware
+
+- Factored the language-neutral parts of the Julia binding support (`PubSubLayer`, `Identifier`, the marshalling helpers) into `goby/middleware/languages/common/interface.h`, shared with the new Python bindings. The Julia names are unchanged.
+- Factored the simulation time setup shared by `goby::run` and the language bindings into `goby/middleware/application/detail/simulation_time.h`, removing a copy of it from the Julia binding.
+
+## Version 3.5.1
+
+### Bug fixes
+
+- Rebuild against Wt 4.13.2 for fix to WGroupBox: https://redmine.emweb.be/issues/14469
+- Fix DEPENDENCIES script
+
+## Version 3.5.0
+
+### Support for new dependency versions
+
+- Add Ubuntu 26.04 (resolute) and Debian 13 (trixie) support
+- Update to DCCL5
+
+### Bug fixes
+
+- Fix regression where loading external modemdriver plugin libraries did not work (bug in 3.4.0)
+
+## Version 3.4.0
+
+### UDP Multicast (UDPM) Transport
+
+A new interprocess transport layer based on UDP multicast (`goby::middleware::UDPMTransport`) has been added. This provides a lightweight alternative to the ZeroMQ interprocess transport:
+
+- Full publish/subscribe support between processes on the same host (or multicast-reachable network).
+- Support for large-message packetization, enabling messages larger than the UDP MTU to be transmitted reliably.
+- Configurable send-rate limiting to control bandwidth usage.
+
+### Middleware
+
+- Added `GOBY_DEFINE_GROUP` and `GOBY_DEFINE_INTERVEHICLE_GROUP` convenience macros to `group.h` to simplify group definitions. This is important for Julia (and future Python) bindings to avoid confusion about the difference between the C++ Group instantiation name (namespace + object) and Group string name, as these macros ensure that these are identical.
+- Added interprocess implementation tag support (PR #380, #385) to allow creation of Applications and Threads running multiple interprocess implementations simultaneously (e.g., ZeroMQ and UDPM together).
+
+### Acomms
+
+- Popoto modem driver fixes and cleanup (PR #386). Thanks @SupunRandeni
+
+### Julia Support
+
+- Updated Julia support to work with Julia 1.12.
+- Added multithreaded application support for Julia: Goby apps can now use Julia Tasks/Channels to run concurrent threaded Goby threads.
+- Consolidated single-threaded and multi-threaded Julia app functions; removed the need to pass `task_id` as a parameter for multithreaded functions.
+- Added Julia docstrings for functions.
+- Added ability to access Protobuf runtime configuration from Julia.
+
+### DCCL 5.0 Compatibility
+
+- Updated Goby to build against the forthcoming DCCL 5.0 release
+
+### Documentation & Tooling
+
+- Renamed `abc_modem_simulator` to `goby_abc_modem_simulator`; updated documentation to use `goby3_example_*` naming convention for examples.
+- Fixed broken Markdown rendering in `src/doc/markdown` documentation.
+- Added UDPM documentation (`doc700_udpm.md`).
+- Added OpenSSF Scorecard CI workflow in collaboration with Open Ocean Software (https://oceansoft.org/).
+
+### Bugs
+
+- Fixed heap-use-after-free in `InterProcessForwarder` during thread shutdown (PR #371).
+- Fixed `join_thread` to block until the thread has actually joined (PR #361).
+- Fixed ThreadSanitizer (TSan) false positives: replaced `condition_variable_any`+`timed_mutex` with `condition_variable`+`mutex`; added TSan annotations for ZMQ inproc zero-copy race (PR #362).
+- Fixed ThreadSanitizer CircleCI job failing with unexpected memory mapping on Linux kernel >= 6.x (PR #364).
+- Fixed `std::result_of` deprecation warning; disabled errors on deprecation warnings when using `-Werror`.
+
+## Version 3.3.1
+
+### Middleware
+
+- Enable support for existing DCCL encryption by setting `app { intervehicle_cfg { dccl_passphrase: "" }}`
+
+### Bugs
+
+- Fix reversed order of fields in Liaison Commander
+- Fix bug in escape function of goby_geov_interface for newer versions of MySQL
+
+## Version 3.3.0
+
+### Middleware
+
+- Preliminary support for Julia language apps in the Goby ZeroMQ middleware via CxxWrap.jl
+
+### Acomms
+
+- Added IPv6 support to the ModemDriver base TCP server (and thus Iridium RockBLOCK driver)
+
 ## Version 3.2.3
 
 ### Acomms

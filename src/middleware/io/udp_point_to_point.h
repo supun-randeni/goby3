@@ -1,4 +1,4 @@
-// Copyright 2019-2023:
+// Copyright 2019-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -34,6 +34,7 @@
 
 #include "goby/middleware/io/detail/io_interface.h" // for PubSubLayer, Pub...
 #include "goby/middleware/protobuf/io.pb.h"         // for IOData
+#include "goby/zeromq/application/simple_thread.h"
 
 #include "udp_one_to_many.h"
 
@@ -67,7 +68,7 @@ template <const goby::middleware::Group& line_in_group,
           PubSubLayer publish_layer = PubSubLayer::INTERPROCESS,
           // but only subscribe on interthread for outgoing traffic
           PubSubLayer subscribe_layer = PubSubLayer::INTERTHREAD,
-          template <class> class ThreadType = goby::middleware::SimpleThread,
+          template <class> class ThreadType = goby::zeromq::SimpleThread,
           bool use_indexed_groups = false>
 class UDPPointToPointThread
     : public UDPOneToManyThread<line_in_group, line_out_group, publish_layer, subscribe_layer,
@@ -86,9 +87,14 @@ class UDPPointToPointThread
         : Base(config, index, false)
     {
         boost::asio::ip::udp::resolver resolver(this->mutable_io());
-        remote_endpoint_ = *resolver.resolve(
-            {this->cfg().remote_address(), std::to_string(this->cfg().remote_port()),
-             boost::asio::ip::resolver_query_base::numeric_service});
+        auto endpoints = resolver.resolve(this->cfg().remote_address(),
+                                          std::to_string(this->cfg().remote_port()),
+                                          boost::asio::ip::resolver_base::numeric_service);
+        if (endpoints.begin() == endpoints.end())
+            throw(goby::Exception("Failed to resolve UDP remote endpoint: " +
+                                  this->cfg().remote_address() + ":" +
+                                  std::to_string(this->cfg().remote_port())));
+        remote_endpoint_ = endpoints.begin()->endpoint();
 
         auto ready = ThreadState::SUBSCRIPTIONS_COMPLETE;
         this->interthread().template publish<line_in_group>(ready);

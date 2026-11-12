@@ -1,4 +1,4 @@
-// Copyright 2019-2023:
+// Copyright 2019-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -26,7 +26,6 @@
 
 #include <array>                 // for array
 #include <boost/asio/buffer.hpp> // for buffer
-#include <boost/asio/ip/udp.hpp>
 #include <boost/asio/ip/udp.hpp>       // for udp, udp::endpoint
 #include <boost/asio/socket_base.hpp>  // for socket_base
 #include <boost/system/error_code.hpp> // for error_code
@@ -38,6 +37,7 @@
 #include "goby/middleware/io/detail/io_interface.h" // for PubSubLayer
 #include "goby/middleware/protobuf/io.pb.h"         // for IOData, UDPEndP...
 #include "goby/middleware/protobuf/udp_config.pb.h" // for UDPOneToManyConfig
+#include "goby/zeromq/application/simple_thread.h"
 
 namespace goby
 {
@@ -60,7 +60,7 @@ template <const goby::middleware::Group& line_in_group,
           // but only subscribe on interthread for outgoing traffic
           PubSubLayer subscribe_layer = PubSubLayer::INTERTHREAD,
           typename Config = goby::middleware::protobuf::UDPOneToManyConfig,
-          template <class> class ThreadType = goby::middleware::SimpleThread,
+          template <class> class ThreadType = goby::zeromq::SimpleThread,
           bool use_indexed_groups = false>
 class UDPOneToManyThread
     : public detail::IOThread<line_in_group, line_out_group, publish_layer, subscribe_layer, Config,
@@ -185,8 +185,11 @@ void goby::middleware::io::UDPOneToManyThread<
 
     boost::asio::ip::udp::resolver resolver(this->mutable_io());
     boost::asio::ip::udp::endpoint remote_endpoint =
-        *resolver.resolve({io_msg->udp_dest().addr(), std::to_string(io_msg->udp_dest().port()),
-                           boost::asio::ip::resolver_query_base::numeric_service});
+        resolver
+            .resolve(io_msg->udp_dest().addr(), std::to_string(io_msg->udp_dest().port()),
+                     boost::asio::ip::resolver_base::numeric_service)
+            .begin()
+            ->endpoint();
 
     this->mutable_socket().async_send_to(
         boost::asio::buffer(io_msg->data()), remote_endpoint,

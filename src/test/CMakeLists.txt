@@ -1,12 +1,3 @@
-add_subdirectory(time)
-add_subdirectory(acomms)
-add_subdirectory(util)
-add_subdirectory(middleware)
-
-if(build_zeromq)
-  add_subdirectory(zeromq)
-endif()
-
-if(build_moos)
-  add_subdirectory(moos)
-endif()
+# ctest -L unit runs the unit tests; ctest -L component runs the component tests
+add_subdirectory(unit)
+add_subdirectory(component)

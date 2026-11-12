@@ -1,4 +1,4 @@
-// Copyright 2020-2021:
+// Copyright 2020-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -24,8 +24,10 @@
 #ifndef GOBY_ZEROMQ_TRANSPORT_INTERMODULE_H
 #define GOBY_ZEROMQ_TRANSPORT_INTERMODULE_H
 
+#include "goby/middleware/transport/detail/implementation_traits.h"
 #include "goby/middleware/transport/intermodule.h"
 
+#include "goby/zeromq/transport/detail/tags.h"
 #include "goby/zeromq/transport/interprocess.h"
 
 namespace goby
@@ -34,8 +36,31 @@ namespace zeromq
 {
 template <typename InnerTransporter = middleware::NullTransporter>
 using InterModulePortal =
-    InterProcessPortalImplementation<InnerTransporter, middleware::InterModulePortalBase>;
-}
+    InterProcessPortalImplementation<InnerTransporter, middleware::InterModulePortalBase,
+                                     detail::InterModuleTag>;
+
+template <typename InnerTransporter = middleware::NullTransporter>
+using InterModuleForwarder =
+    middleware::InterModuleForwarder<InnerTransporter, detail::InterModuleTag>;
+
+} // namespace zeromq
+} // namespace goby
+
+namespace goby
+{
+namespace middleware
+{
+namespace detail
+{
+template <> struct implementation_traits<goby::zeromq::detail::InterModuleTag>
+{
+    template <typename InnerTransporter>
+    using Portal = goby::zeromq::InterModulePortal<InnerTransporter>;
+    using PortalConfig = goby::zeromq::protobuf::InterProcessPortalConfig;
+    static constexpr const char* name = "zeromq";
+};
+} // namespace detail
+} // namespace middleware
 } // namespace goby
 
 #endif

@@ -1,4 +1,4 @@
-// Copyright 2019-2025:
+// Copyright 2019-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -32,7 +32,7 @@
 #include <utility> // for pair
 #include <vector>  // for vector
 
-#include <boost/filesystem.hpp> // for path
+#include <filesystem>
 
 #include "goby/middleware/application/configuration_reader.h" // for Config...
 #include "goby/middleware/application/interface.h"            // for run
@@ -107,8 +107,8 @@ class LogTool : public goby::middleware::Application<protobuf::LogConvertToolCon
         }
         else
         {
-            boost::filesystem::path input_path(app_cfg().input_file(0));
-            std::string output_file = input_path.stem().native();
+            std::filesystem::path input_path(app_cfg().input_file(0));
+            std::string output_file = input_path.stem().string();
             switch (app_cfg().format())
             {
                 case protobuf::LogConvertToolConfig::DEBUG_TEXT: output_file += ".txt"; break;
@@ -200,7 +200,10 @@ goby::apps::middleware::LogTool::LogTool()
 
     for (const auto& lib : app_cfg().load_shared_library())
     {
-        void* lib_handle = dlopen(lib.c_str(), RTLD_LAZY);
+        // RTLD_NODELETE: keep the library mapped for the life of the process (even if
+        // dlclose() is called) as the protobuf descriptor pools may reference memory
+        // (e.g. custom options extensions) owned by this library at static destruction
+        void* lib_handle = dlopen(lib.c_str(), RTLD_LAZY | RTLD_NODELETE);
         if (!lib_handle)
             glog.is_die() && glog << "Failed to open library: " << lib << std::endl;
         dl_handles_.push_back(lib_handle);

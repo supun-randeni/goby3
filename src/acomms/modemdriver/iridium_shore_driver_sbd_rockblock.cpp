@@ -1,4 +1,4 @@
-// Copyright 2023:
+// Copyright 2023-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -31,10 +31,25 @@
 #include "goby/util/debug_logger/flex_ostreambuf.h"     // for DEBUG1
 #include "goby/util/debug_logger/logger_manipulators.h" // for opera...
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation-deprecated-sync" 
 #include "goby/util/thirdparty/jwt-cpp/traits/nlohmann-json/defaults.h"
+#pragma clang diagnostic pop
+#else
+#include "goby/util/thirdparty/jwt-cpp/traits/nlohmann-json/defaults.h"
+#endif
+
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-literal-operator" 
 #include "goby/util/thirdparty/cpp-httplib/httplib.h"
+#pragma clang diagnostic pop
+#else
+#include "goby/util/thirdparty/cpp-httplib/httplib.h"
+#endif
 
 #include "iridium_shore_driver.h"
 
@@ -62,6 +77,9 @@ void goby::acomms::IridiumShoreDriver::startup_sbd_rockblock(const protobuf::Dri
 
     if (iridium_shore_driver_cfg().has_mo_sbd_server_port() || !driver_cfg_.has_tcp_port())
         driver_cfg_.set_tcp_port(iridium_shore_driver_cfg().mo_sbd_server_port());
+
+    if (iridium_shore_driver_cfg().has_ipv6())
+        driver_cfg_.set_ipv6(iridium_shore_driver_cfg().ipv6());
 
     // new line for HTTP; JSON message has no newline so use }
     driver_cfg_.set_line_delimiter("\n|}");

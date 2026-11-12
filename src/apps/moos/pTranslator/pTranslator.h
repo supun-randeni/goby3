@@ -1,4 +1,4 @@
-// Copyright 2011-2021:
+// Copyright 2011-2026:
 //   GobySoft, LLC (2013-)
 //   Massachusetts Institute of Technology (2007-2014)
 //   Community contributors (see AUTHORS file)
@@ -110,7 +110,7 @@ class CpTranslator : public goby::moos::GobyMOOSApp
     bool new_origin_;
 
     boost::asio::io_context timer_io_context_;
-    boost::asio::io_context::work work_;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_{boost::asio::make_work_guard(timer_io_context_)};
 
     std::vector<std::shared_ptr<Timer> > timers_;
 

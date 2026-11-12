@@ -1,4 +1,4 @@
-// Copyright 2016-2021:
+// Copyright 2016-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -63,6 +63,8 @@ class InterThreadTransporter
     };
 
   public:
+    using implementation_tag = void;
+
     InterThreadTransporter() : data_mutex_(std::make_shared<std::mutex>()) {}
 
     virtual ~InterThreadTransporter()
@@ -145,9 +147,11 @@ class InterThreadTransporter
     ///
     /// \tparam Data data type to subscribe to.
     /// \tparam scheme Marshalling scheme id (typically MarshallingScheme::MarshallingSchemeEnum). Can usually be inferred from the Data type.
+    /// \tparam necessity How important is this subscription (is it required?)
     /// \param f Callback function or lambda that is called upon receipt of the subscribed data
     /// \param group group to subscribe to (typically a DynamicGroup)
-    template <typename Data, int scheme = scheme<Data>()>
+    template <typename Data, int scheme = scheme<Data>(),
+              Necessity necessity = Necessity::OPTIONAL>
     void subscribe_dynamic(std::function<void(const Data&)> f, const Group& group,
                            const Subscriber<Data>& /*subscriber*/ = Subscriber<Data>())
     {
@@ -162,9 +166,11 @@ class InterThreadTransporter
     ///
     /// \tparam Data data type to subscribe to.
     /// \tparam scheme Marshalling scheme id (typically MarshallingScheme::MarshallingSchemeEnum). Can usually be inferred from the Data type.
+    /// \tparam necessity How important is this subscription (is it required?)
     /// \param f Callback function or lambda that is called upon receipt of the subscribed data
     /// \param group group to subscribe to (typically a DynamicGroup)
-    template <typename Data, int scheme = scheme<Data>()>
+    template <typename Data, int scheme = scheme<Data>(),
+              Necessity necessity = Necessity::OPTIONAL>
     void subscribe_dynamic(std::function<void(std::shared_ptr<const Data>)> f, const Group& group,
                            const Subscriber<Data>& /*subscriber*/ = Subscriber<Data>())
     {
@@ -202,7 +208,7 @@ class InterThreadTransporter
 
   private:
     friend Poller<InterThreadTransporter>;
-    int _poll(std::unique_ptr<std::unique_lock<std::timed_mutex>>& lock)
+    int _poll(std::unique_ptr<std::unique_lock<std::mutex>>& lock)
     {
         return detail::SubscriptionStoreBase::poll_all(std::this_thread::get_id(), lock);
     }

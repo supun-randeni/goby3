@@ -1,4 +1,4 @@
-// Copyright 2019-2023:
+// Copyright 2019-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -24,8 +24,6 @@
 #ifndef GOBY_MIDDLEWARE_TRANSPORT_INTERVEHICLE_DRIVER_THREAD_H
 #define GOBY_MIDDLEWARE_TRANSPORT_INTERVEHICLE_DRIVER_THREAD_H
 
-#include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -39,6 +37,8 @@
 #include "goby/acomms/amac/mac_manager.h"
 #include "goby/acomms/buffer/dynamic_buffer.h"
 #include "goby/acomms/modemdriver/driver_base.h"
+#include "goby/acomms/modemdriver/driver_exception.h"
+#include "goby/acomms/protobuf/modem_driver_status.pb.h"
 #include "goby/middleware/application/thread.h"
 #include "goby/middleware/group.h"
 #include "goby/middleware/marshalling/dccl.h"
@@ -127,29 +127,43 @@ serialize_publication(const Data& d, const Group& group, const Publisher<Data>& 
     return msg;
 }
 
-class ModemDriverThread
-    : public goby::middleware::Thread<intervehicle::protobuf::PortalConfig::LinkConfig,
-                                      InterProcessForwarder<InterThreadTransporter>>
+/// \brief Provides the modem driver thread used by InterVehiclePortal, templated on
+///        ImplementationTag so it uses the same InterProcessForwarder prefix as the portal's
+///        InnerTransporter.
+template <typename ImplementationTag>
+class ModemDriverThread : public goby::middleware::Thread<
+                              intervehicle::protobuf::PortalConfig::LinkConfig,
+                              InterProcessForwarder<InterThreadTransporter, ImplementationTag>>
 {
   public:
     using buffer_data_type = goby::middleware::protobuf::SerializerTransporterMessage;
     using modem_id_type = goby::acomms::DynamicBuffer<buffer_data_type>::modem_id_type;
     using subbuffer_id_type = goby::acomms::DynamicBuffer<buffer_data_type>::subbuffer_id_type;
+    using buffer_value_type = goby::acomms::DynamicBuffer<buffer_data_type>::Value;
 
     ModemDriverThread(const intervehicle::protobuf::PortalConfig::LinkConfig& cfg);
     void loop() override;
     int tx_queue_size() { return buffer_.size(); }
 
   private:
+    void finalize() override;
     void _data_request(goby::acomms::protobuf::ModemTransmission* msg);
     void _buffer_message(
         const std::shared_ptr<const goby::middleware::protobuf::SerializerTransporterMessage>& msg);
     void _receive(const goby::acomms::protobuf::ModemTransmission& rx_msg);
     void _forward_subscription(intervehicle::protobuf::Subscription subscription);
     void _accept_subscription(const intervehicle::protobuf::Subscription& subscription);
+    void _ack_value(intervehicle::protobuf::AckMessagePair& ack_pair,
+                    const goby::time::SteadyClock::time_point now,
+                    const goby::acomms::DynamicBuffer<buffer_data_type>::Value& value);
     void _expire_value(const goby::time::SteadyClock::time_point now,
                        const goby::acomms::DynamicBuffer<buffer_data_type>::Value& value,
                        intervehicle::protobuf::ExpireData::ExpireReason reason);
+    void _erase_pending_ack(
+        const std::vector<goby::acomms::DynamicBuffer<buffer_data_type>::Value>& values);
+    void _discard_superseded(
+        const std::vector<goby::acomms::DynamicBuffer<buffer_data_type>::Value>& values);
+    std::vector<buffer_value_type> _take_superseded(const buffer_value_type& value);
 
     subbuffer_id_type _create_buffer_id(unsigned dccl_id, unsigned group);
 
@@ -167,7 +181,7 @@ class ModemDriverThread
 
     void _try_create_or_update_buffer(modem_id_type dest_id, const subbuffer_id_type& buffer_id);
 
-    modem_id_type _broadcast_id() { return cfg().modem_id() & cfg().subnet_mask(); }
+    modem_id_type _broadcast_id() { return this->cfg().modem_id() & this->cfg().subnet_mask(); }
 
     // id within subnet
     modem_id_type _id_within_subnet(modem_id_type id) { return id - _broadcast_id(); }
@@ -177,22 +191,27 @@ class ModemDriverThread
 
     bool _dest_is_in_subnet(modem_id_type dest_id)
     {
-        bool dest_in_subnet =
-            (dest_id & cfg().subnet_mask()) == (cfg().modem_id() & cfg().subnet_mask());
+        bool dest_in_subnet = (dest_id & this->cfg().subnet_mask()) ==
+                              (this->cfg().modem_id() & this->cfg().subnet_mask());
         if (!dest_in_subnet)
-            goby::glog.is_debug3() && goby::glog
-                                          << "Dest: " << dest_id
-                                          << " is not in subnet (our id: " << cfg().modem_id()
-                                          << ", mask: " << cfg().subnet_mask() << ")" << std::endl;
+            goby::glog.is_debug3() &&
+                goby::glog << "Dest: " << dest_id
+                           << " is not in subnet (our id: " << this->cfg().modem_id()
+                           << ", mask: " << this->cfg().subnet_mask() << ")" << std::endl;
 
         return dest_in_subnet;
     }
 
     void _publish_subscription_report(const intervehicle::protobuf::Subscription& changed);
+    void _create_driver();
+    bool _try_driver_startup();
+    // returns false if the failure should instead terminate the portal
+    bool _restart_on_failure(const goby::acomms::ModemDriverException& e);
+    void _publish_modem_report();
 
   private:
     std::unique_ptr<InterThreadTransporter> interthread_;
-    std::unique_ptr<InterProcessForwarder<InterThreadTransporter>> interprocess_;
+    std::unique_ptr<InterProcessForwarder<InterThreadTransporter, ImplementationTag>> interprocess_;
 
     std::multimap<subbuffer_id_type, goby::middleware::protobuf::SerializerTransporterKey>
         publisher_buffer_cfg_;
@@ -204,6 +223,16 @@ class ModemDriverThread
 
     goby::middleware::protobuf::SerializerTransporterKey subscription_key_;
     std::set<modem_id_type> subscription_subbuffers_;
+    struct QueuedSubscription
+    {
+        intervehicle::protobuf::Subscription subscription;
+        buffer_data_type data;
+        // equivalent subscriptions (possibly from other local subscribers) that this one replaced
+        // and now stands in for: they are acked or expired along with it
+        std::vector<buffer_value_type> superseded;
+    };
+    // subscriptions queued or awaiting ack per destination, so a newer equivalent one can replace them
+    std::map<modem_id_type, std::vector<QueuedSubscription>> queued_subscriptions_;
 
     goby::acomms::DynamicBuffer<buffer_data_type> buffer_;
 
@@ -216,10 +245,13 @@ class ModemDriverThread
 
     std::string glog_group_;
 
-    static std::map<std::string, void*> driver_plugins_;
-
     goby::time::SteadyClock::time_point next_modem_report_time_;
     const goby::time::SteadyClock::duration modem_report_interval_;
+
+    bool driver_started_{false};
+    goby::acomms::protobuf::ModemDriverStatus::Status failure_status_{
+        goby::acomms::protobuf::ModemDriverStatus::NOMINAL};
+    goby::time::SteadyClock::time_point next_restart_attempt_;
 };
 
 } // namespace intervehicle

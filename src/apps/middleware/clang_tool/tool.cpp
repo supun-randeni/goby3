@@ -57,8 +57,13 @@ static cl::opt<std::string>
 static cl::opt<std::string>
     OutFile("o",
             cl::desc("Specify output file name (optional, defaults to {target}_interface.yml for "
-                     "-gen and {deployment}.dot for -viz)"),
-            cl::value_desc("file.[yml|dot]"), cl::cat(Goby3ToolCategory));
+                     "-gen and {deployment}.dot (or .d2) for -viz)"),
+            cl::value_desc("file.[yml|dot|d2]"), cl::cat(Goby3ToolCategory));
+
+static cl::opt<std::string> Format("format",
+                                   cl::desc("For '-viz', output format: dot (Graphviz) or d2"),
+                                   cl::value_desc("dot|d2"), cl::init("dot"),
+                                   cl::cat(Goby3ToolCategory));
 
 static cl::opt<std::string> Target("target",
                                    cl::desc("Specify target (binary) name for '-gen' action"),
@@ -101,6 +106,16 @@ static cl::opt<std::string> DotSplines("splines", cl::desc("For '-viz', Graphviz
                                        cl::cat(Goby3ToolCategory));
 
 static cl::opt<bool>
+    ExpandInstances("expand-instances",
+                    cl::desc("For '-viz', draw each of a platform's instances: separately"),
+                    cl::cat(Goby3ToolCategory));
+
+static cl::opt<bool> ExpandGobyApps(
+    "expand-goby-apps",
+    cl::desc("For '-viz', draw Goby's own applications (gobyd, goby_*) with their threads"),
+    cl::cat(Goby3ToolCategory));
+
+static cl::opt<bool>
     IncludeAll("include-all",
                cl::desc("For '-viz', include all groups, include goby internal groups"),
                cl::cat(Goby3ToolCategory));
@@ -134,7 +149,10 @@ int main(int argc, const char** argv)
                                                 DotSplines,
                                                 OmitGroupRegex,
                                                 OmitNodeRegex,
-                                                OmitInterThread};
+                                                OmitInterThread,
+                                                ExpandInstances,
+                                                IncludeAll ? true : ExpandGobyApps,
+                                                Format};
 
         return goby::clang::visualize(SharedOptionsParser->getSourcePathList(), params);
     }

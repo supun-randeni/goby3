@@ -1,4 +1,4 @@
-// Copyright 2020-2023:
+// Copyright 2020-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -67,14 +67,12 @@ namespace io
 {
 namespace detail
 {
-template <const goby::middleware::Group& line_in_group,
-          const goby::middleware::Group& line_out_group,
-          // by default publish all incoming traffic to interprocess for logging
-          PubSubLayer publish_layer = PubSubLayer::INTERPROCESS,
-          // but only subscribe on interthread for outgoing traffic
-          PubSubLayer subscribe_layer = PubSubLayer::INTERTHREAD,
-          template <class> class ThreadType = goby::middleware::SimpleThread,
-          bool use_indexed_groups = false>
+template <
+    const goby::middleware::Group& line_in_group, const goby::middleware::Group& line_out_group,
+    // by default publish all incoming traffic to interprocess for logging
+    PubSubLayer publish_layer,
+    // but only subscribe on interthread for outgoing traffic
+    PubSubLayer subscribe_layer, template <class> class ThreadType, bool use_indexed_groups = false>
 class PTYThread
     : public detail::IOThread<line_in_group, line_out_group, publish_layer, subscribe_layer,
                               goby::middleware::protobuf::PTYConfig,
@@ -191,8 +189,11 @@ void goby::middleware::io::detail::PTYThread<line_in_group, line_out_group, publ
     this->mutable_socket().assign(pty_internal);
 
     // re-symlink to new PTY
+    // the kernel assigns the lowest free pty index, so /dev/pts/0 is a valid
+    // choice when no other pseudoterminals are in use (e.g. on an embedded system)
     char pty_external_path[256];
-    ptsname_r(pty_internal, pty_external_path, sizeof(pty_external_path));
+    if (ptsname_r(pty_internal, pty_external_path, sizeof(pty_external_path)) != 0)
+        throw(goby::Exception(std::string("Error in ptsname_r: ") + std::strerror(errno)));
 
     if (symlink(pty_external_path, pty_external_symlink) == -1)
         throw(goby::Exception(std::string("Could not create symlink: ") + pty_external_symlink));

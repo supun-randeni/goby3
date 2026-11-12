@@ -1,5 +1,6 @@
 #!/bin/bash
 # Dependencies installation script for Goby
+set -euo pipefail
 
 if [[ $UID -ne 0 ]]; then printf "You must run this script as root. Use 'sudo' in Ubuntu. \n" 1>&2; exit 1; fi
 
@@ -18,6 +19,7 @@ usage()
     echo -e "\t-h\t\tShow help."
     echo -e "\t-g\t\tAlso install GUI-related dependencies"
     echo -e "\t-m\t\tAlso install MOOS-related dependencies"
+    echo -e "\t-z\t\tAlso install Zenoh-related dependencies from Eclipse's Debian repository (download.eclipse.org)"
     echo -e "\t-a\t\tAlso install all dependencies used to build the code in the Debian package (apt-get build-dep goby3 --arch-only)."
     echo -e "\t-d\t\tAlso install dependencies for building documentation  (apt-get build-dep goby3 --indep-only)"
     echo -e "\t-c\t\tUse 'continuous' series on packages.gobysoft.org instead of 'release' when resolving and installing dependencies"
@@ -42,7 +44,7 @@ validate_url()
 DEPENDS_RETVAL=
 depends()
 {
-    DEPENDS_RETVAL=$(apt-cache depends $1 | egrep "Depends|Recommends" | egrep --invert-match libgoby3-dev | egrep --invert-match "<.*>|dccl3" | sed 's/.*: //' | tr '\r\n' ' ')
+    DEPENDS_RETVAL=$(apt-cache depends $1 | egrep "Depends|Recommends" | egrep --invert-match libgoby3-dev | egrep --invert-match "<.*>|dccl4" | sed 's/.*: //' | tr '\r\n' ' ')
 }
 
 PACKAGE_SERIES=release
@@ -51,14 +53,16 @@ INSTALL_ALL_DEPENDS=false
 INSTALL_DOC_DEPENDS=false
 INSTALL_MOOS_DEPENDS=false
 INSTALL_GUI_DEPENDS=false
+INSTALL_ZENOH_DEPENDS=false
 
-while getopts ":hdcgma" opt; do
+while getopts ":hdcgmaz" opt; do
     case $opt in
         h) usage; exit 1 ;;
         c) PACKAGE_SERIES=continuous ;;
         g) INSTALL_GUI_DEPENDS=true ;;
         m) INSTALL_MOOS_DEPENDS=true ;;
         a) INSTALL_ALL_DEPENDS=true ;;
+        z) INSTALL_ZENOH_DEPENDS=true ;;
         d) INSTALL_DOC_DEPENDS=true ;;
         \?)
             echo "Invalid option: -$OPTARG. For help use -h."
@@ -101,17 +105,20 @@ case $OS_ID in
         echo "Release: $RELEASE_CODENAME"
 
         echo "==== Installing packages required to run this script ==="
-        (set -x; apt-get update -qq && apt-get -y install wget dirmngr apt-transport-https)
+        (set -x; apt-get update -qq && apt-get -y install wget dirmngr curl gnupg)
         
-        PACKAGES_URL_BASE="https://packages.gobysoft.org/${OS_ID}/${PACKAGE_SERIES}/"
+        PACKAGES_URL_BASE="http://packages.gobysoft.org/${OS_ID}/${PACKAGE_SERIES}/"
+        ZENOH_URL_BASE="https://download.eclipse.org/zenoh/debian-repo/"
 
         echo "==== Checking dependencies for your OS (${OS_ID}) and release (${RELEASE_CODENAME}) on packages.gobysoft.org ===="
         if validate_url ${PACKAGES_URL_BASE}/${RELEASE_CODENAME}/Release; then
             echo "Release codename found"
             echo "==== Adding packages.gobysoft.org Debian repository ===="
-            (set -x; echo -e "deb ${PACKAGES_URL_BASE} ${RELEASE_CODENAME}/\ndeb-src ${PACKAGES_URL_BASE} ${RELEASE_CODENAME}/" > /etc/apt/sources.list.d/gobysoft_${PACKAGE_SERIES}.list && \
-                 apt-key adv --recv-key --keyserver keyserver.ubuntu.com 19478082E2F8D3FE &&
-                 apt-get update -qq)
+            (set -x
+             install -m 0755 -d /usr/share/keyrings
+             curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x19478082E2F8D3FE" | gpg --dearmor -o /usr/share/keyrings/gobysoft-archive-keyring.gpg 
+             echo -e "deb [signed-by=/usr/share/keyrings/gobysoft-archive-keyring.gpg] ${PACKAGES_URL_BASE} ${RELEASE_CODENAME}/\ndeb-src [signed-by=/usr/share/keyrings/gobysoft-archive-keyring.gpg] ${PACKAGES_URL_BASE} ${RELEASE_CODENAME}/" > /etc/apt/sources.list.d/gobysoft_${PACKAGE_SERIES}.list
+             apt-get update -qq)
         else
             echo "Release codename not found on packages.gobysoft.org."
             fail
@@ -125,10 +132,20 @@ case $OS_ID in
         # install clang if GCC is less than 7.2
         dpkg --compare-versions `dpkg-query --showformat='${Version}' --show gcc` ">=" 4:7.2~ ||  (set -x; echo "Installing clang as your GCC version is less than 7.2"; apt-get install clang)
         
-        [[ "${INSTALL_MOOS_DEPENDS}" == "true" ]] && (depends "libgoby3-moos-dev"; set -x; apt-get install $DEPENDS_RETVAL)
-        [[ "${INSTALL_GUI_DEPENDS}" == "true" ]] && (depends "libgoby3-gui-dev"; set -x; apt-get install $DEPENDS_RETVAL)
-        [[ "${INSTALL_DOC_DEPENDS}" == "true" ]] && (set -x; apt-get build-dep goby3 --indep-only)
-        [[ "${INSTALL_ALL_DEPENDS}" == "true" ]] && (set -x; apt-get build-dep goby3 --arch-only)
+        if [[ "${INSTALL_ZENOH_DEPENDS}" == "true" || "${INSTALL_ALL_DEPENDS}" == "true" ]]; then
+            echo "==== Adding Eclipse Zenoh Debian repository ===="
+            (set -x
+             install -m 0755 -d /usr/share/keyrings
+             curl -fsSL "${ZENOH_URL_BASE}/zenoh-public-key" | gpg --dearmor -o /usr/share/keyrings/zenoh-archive-keyring.gpg
+             echo "deb [signed-by=/usr/share/keyrings/zenoh-archive-keyring.gpg] ${ZENOH_URL_BASE} /" > /etc/apt/sources.list.d/eclipse_zenoh.list
+             apt-get update -qq)
+        fi
+
+        [[ "${INSTALL_ZENOH_DEPENDS}" == "true" ]] && (depends "libgoby3-zenoh-dev"; set -x; apt-get -y install $DEPENDS_RETVAL)
+        [[ "${INSTALL_MOOS_DEPENDS}" == "true" ]] && (depends "libgoby3-moos-dev"; set -x; apt-get -y install $DEPENDS_RETVAL)
+        [[ "${INSTALL_GUI_DEPENDS}" == "true" ]] && (depends "libgoby3-gui-dev"; set -x; apt-get -y install $DEPENDS_RETVAL)
+        [[ "${INSTALL_DOC_DEPENDS}" == "true" ]] && (set -x; apt-get -y build-dep goby3 --indep-only)
+        [[ "${INSTALL_ALL_DEPENDS}" == "true" ]] && (set -x; apt-get -y build-dep goby3 --arch-only)
 
         ;;
     *)

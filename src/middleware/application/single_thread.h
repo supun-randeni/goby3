@@ -1,4 +1,4 @@
-// Copyright 2016-2023:
+// Copyright 2016-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -35,6 +35,7 @@
 #include "goby/middleware/application/interface.h"
 #include "goby/middleware/application/thread.h"
 
+#include "goby/middleware/transport/detail/implementation_traits.h"
 #include "goby/middleware/transport/interprocess.h"
 #include "goby/middleware/transport/intervehicle.h"
 
@@ -61,6 +62,8 @@ class SingleThreadApplication
 
     friend class coroner::Application<SingleThreadApplication<Config, InterProcessPortal>>;
     friend class terminate::Application<SingleThreadApplication<Config, InterProcessPortal>>;
+    template <typename App> friend class goby::middleware::julia::ApplicationWrapper;
+    template <typename App> friend class goby::middleware::python::ApplicationWrapper;
 
   public:
     /// \brief Construct the application calling loop() at the given frequency (double overload)
@@ -75,7 +78,7 @@ class SingleThreadApplication
     ///
     /// \param loop_freq The frequency at which to attempt to call loop(), assuming the main thread isn't blocked handling transporter callbacks (e.g. subscribe callbacks). Zero or negative indicates loop() will never be called.
     SingleThreadApplication(boost::units::quantity<boost::units::si::frequency> loop_freq)
-        : MainThread(this->app_cfg(), loop_freq),
+        : MainThread(this->app_cfg(), this->choose_loop_freq(loop_freq)),
           interprocess_(
               detail::make_interprocess_config(this->app_cfg().interprocess(), this->app_name())),
           intervehicle_(interprocess_)
@@ -114,6 +117,15 @@ class SingleThreadApplication
   private:
     void run() override { MainThread::run_once(); }
 };
+
+/// \brief SingleThreadApplication for a given interprocess ImplementationTag (e.g. zeromq::detail::InterProcessTag), rather than a portal template.
+///
+/// \tparam Config Configuration type
+/// \tparam ImplementationTag Tag selecting the interprocess implementation
+template <class Config, typename ImplementationTag>
+using SingleThreadApplicationFor =
+    SingleThreadApplication<Config,
+                            detail::implementation_traits<ImplementationTag>::template Portal>;
 
 } // namespace middleware
 } // namespace goby

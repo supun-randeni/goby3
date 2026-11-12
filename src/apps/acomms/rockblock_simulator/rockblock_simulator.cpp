@@ -1,4 +1,4 @@
-// Copyright 2023:
+// Copyright 2023-2026:
 //   GobySoft, LLC (2013-)
 //   Community contributors (see AUTHORS file)
 // File authors:
@@ -33,7 +33,15 @@
 #include "goby/acomms/protobuf/iridium_driver.pb.h"
 #include "goby/acomms/protobuf/rockblock_simulator_config.pb.h"
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-literal-operator" 
 #include "goby/util/thirdparty/cpp-httplib/httplib.h"
+#pragma clang diagnostic pop
+#else
+#include "goby/util/thirdparty/cpp-httplib/httplib.h"
+#endif
+
 #include "goby/util/thirdparty/nlohmann/json.hpp"
 
 using goby::glog;
@@ -99,7 +107,7 @@ class RockBLOCKSimulator
 };
 
 class RockBLOCKMTHTTPEndpointThread
-    : public goby::middleware::SimpleThread<protobuf::RockBLOCKSimulatorConfig>
+    : public goby::middleware::StandaloneThread<protobuf::RockBLOCKSimulatorConfig>
 {
   public:
     RockBLOCKMTHTTPEndpointThread(const protobuf::RockBLOCKSimulatorConfig cfg);
@@ -113,11 +121,11 @@ class RockBLOCKMTHTTPEndpointThread
 class RockBLOCKPTYThread
     : public goby::middleware::io::detail::PTYThread<
           pty_in, pty_out, goby::middleware::io::PubSubLayer::INTERTHREAD,
-          goby::middleware::io::PubSubLayer::INTERTHREAD, goby::middleware::SimpleThread>
+          goby::middleware::io::PubSubLayer::INTERTHREAD, goby::middleware::StandaloneThread>
 {
     using Base = goby::middleware::io::detail::PTYThread<
         pty_in, pty_out, goby::middleware::io::PubSubLayer::INTERTHREAD,
-        goby::middleware::io::PubSubLayer::INTERTHREAD, goby::middleware::SimpleThread>;
+        goby::middleware::io::PubSubLayer::INTERTHREAD, goby::middleware::StandaloneThread>;
 
   public:
     RockBLOCKPTYThread(const goby::middleware::protobuf::PTYConfig& config, int index)
@@ -314,7 +322,7 @@ void goby::apps::acomms::RockBLOCKSimulator::process_command_data(
             std::string rx_msg{0, SBD_FIELD_SIZE_BYTES};
             unsigned message_size = modem_data.mt_message->size();
             rx_msg[0] = (message_size >> SBD_BITS_IN_BYTE) & 0xFF;
-            rx_msg[1] = (message_size)&0xFF;
+            rx_msg[1] = (message_size) & 0xFF;
             rx_msg += *modem_data.mt_message;
             unsigned int csum = goby::acomms::iridium::sbd_csum(*modem_data.mt_message);
             const int bits_in_byte = 8;
@@ -450,7 +458,7 @@ void goby::apps::acomms::RockBLOCKSimulator::write_mo_message(int index)
 
 goby::apps::acomms::RockBLOCKMTHTTPEndpointThread::RockBLOCKMTHTTPEndpointThread(
     const protobuf::RockBLOCKSimulatorConfig cfg)
-    : goby::middleware::SimpleThread<protobuf::RockBLOCKSimulatorConfig>(cfg)
+    : goby::middleware::StandaloneThread<protobuf::RockBLOCKSimulatorConfig>(cfg)
 {
     for (const auto& imei_to_id : cfg.imei_to_id()) imei_in_use_.insert(imei_to_id.imei());
 

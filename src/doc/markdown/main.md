@@ -24,6 +24,8 @@ If you're looking for more detail on various Goby applications, see the followin
   * [ZeroMQ applications](doc501_zeromq_applications.md)
   * (for MOOS users) [MOOS applications](doc600_moos.md)
   * (for ROS users) [goby_ros_gateway](https://github.com/GobySoft/goby_ros_gateway) ROS package.
+  * (for Julia and Python users) [Applications in other languages](doc250_languages.md)
+  * [Interfaces and deployments](doc260_interfaces.md): checking and drawing the publish/subscribe graph of a system
 
 ## Developer manual
 
@@ -48,9 +50,17 @@ The core `libgoby.so` is comprised of several conceptual components:
 
   * [zeromq](doc500_zeromq.md) - implementation of the Goby3 interprocess portal using the [ZeroMQ](https://zeromq.org/) transport library.
 
+### Zenoh support library
+
+  * [zenoh](doc750_zenoh.md) - implementation of the Goby3 interprocess and intermodule portals using the [Zenoh](https://zenoh.io/) transport protocol.
+
 ### MOOS support library
 
   * [moos](doc600_moos.md) - classes, applications (e.g. pAcommsHandler and iFrontSeat), and functions for interoperating between Goby and the [MOOS](https://github.com/themoos/core-moos) middleware.
+
+### Maintenance
+
+  * [Cleanups deferred to Goby 4](doc990_v4_cleanup.md) - changes that are worth making but that break released API, ABI or the configuration command line.
 
 ## Publications
 
